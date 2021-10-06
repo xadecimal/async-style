@@ -49,10 +49,12 @@
 
 (defn <?'
   [chan-or-value]
-  `(let [chan-or-value# ~chan-or-value
+  `(let [chan-or-value# (try ~chan-or-value
+                             (catch Throwable t#
+                               t#))
          value-or-error# (if (chan? chan-or-value#)
                            (a/<! chan-or-value#)
-                           (a/<! (go-async chan-or-value#)))]
+                           chan-or-value#)]
      (if (error? value-or-error#)
        (throw value-or-error#)
        value-or-error#)))
@@ -160,10 +162,12 @@
         line (:line form-meta)
         column (:column form-meta)]
     `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
-           chan-or-value# ~chan-or-value
+           chan-or-value# (try ~chan-or-value
+                               (catch Throwable t#
+                                 t#))
            value-or-error# (if (chan? chan-or-value#)
                              (a/<! chan-or-value#)
-                             (a/<! (go-async chan-or-value#)))]
+                             chan-or-value#)]
        (if (error? value-or-error#)
          (throw
           (ex-async
