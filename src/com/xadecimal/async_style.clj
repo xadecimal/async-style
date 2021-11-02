@@ -1,11 +1,15 @@
 (ns com.xadecimal.async-style
-  (:refer-clojure :exclude [await resolve promise])
-  (:require [clojure.core.async :as a])
-  (:import [clojure.core.async.impl.channels ManyToManyChannel]
-           [clojure.core.async.impl.buffers PromiseBuffer]
-           [java.util Collections]))
+  (:refer-clojure :exclude [await resolve])
+  (:require [clj-async-profiler.core :as prof]
+            [clj-java-decompiler.core :as decomp]
+            [clojure.core.async :as a]
+            [clojure.walk :as walk]
+            [criterium.core :as cr]
+            [hyperfiddle.rcf :as rcf :refer [! % tests]])
+  (:import clojure.core.async.impl.channels.ManyToManyChannel
+           java.util.Collections
+           java.util.concurrent.TimeoutException))
 
-;; TODO: support multiple catch clause in implicit-try
 ;; TODO: add support for cancellation, and make race and any and all auto-cancel
 ;; TODO: add support for heavy CPU compute operations, and blocking IO operations
 ;; TODO: Add ClojureScript support
@@ -13,19 +17,18 @@
 
 (defn implicit-try
   [body]
-  (let [try' (take-while #(or (not (seqable? %)) (not (#{'catch 'finally} (first %)))) body)
-        rem (drop-while #(or (not (seqable? %)) (not (#{'catch 'finally} (first %)))) body)
-        catch (when (and (seqable? (first rem)) (= 'catch (ffirst rem))) (first rem))
+  (let [[try' rem] (split-with #(or (not (seqable? %)) (not (#{'catch 'finally} (first %)))) body)
+        [catches rem] (split-with #(and (seqable? %) (= 'catch (first %))) rem)
         finally (or (when (and (seqable? (first rem)) (= 'finally (ffirst rem))) (first rem))
                     (when (and (seqable? (second rem)) (= 'finally (-> rem second first))) (second rem)))]
-    (when (not= `(~@try' ~@(when catch [catch]) ~@(when finally [finally])) body)
-      (throw (ex-info "Bad syntax, form must either not have a catch and finally block, or it must have end with both a catch followed by a finally block in that order, or it must end with a single catch block, or it must end with a single finally block." {})))
-    `(~@(if (not (or catch finally))
+    (when (not= `(~@try' ~@(when catches catches) ~@(when finally [finally])) body)
+      (throw (ex-info "Bad syntax, form must either not have a catch and finally block, or it must end with one or more catch blocks followed by a finally block in that order, or it must end with one or more catch blocks, or it must end with a single finally block." {})))
+    `(~@(if (not (or (seq catches) finally))
           body
           [`(try
               ~@try'
-              ~@(when catch
-                  [catch])
+              ~@(when catches
+                  catches)
               ~@(when finally
                   [finally]))]))))
 
@@ -37,6 +40,18 @@
       (a/put! chan v)
       (a/close! chan))))
 
+(defn error?
+  [v]
+  (instance? Throwable v))
+
+(defn ok?
+  [v]
+  (not (error? v)))
+
+(defn chan?
+  [v]
+  (instance? ManyToManyChannel v))
+
 (defmacro go-async
   [& body]
   `(let [ret# (a/promise-chan)]
@@ -47,21 +62,58 @@
          (resolve ret# res#)))
      ret#))
 
-(defn <?'
+(defn join'
+  [chan]
+  `(loop [res# (a/<! ~chan)]
+     (if (chan? res#)
+       (recur (a/<! res#))
+       res#)))
+
+(defn <<!'
   [chan-or-value]
-  `(let [chan-or-value# (try ~chan-or-value
-                             (catch Throwable t#
-                               t#))
-         value-or-error# (if (chan? chan-or-value#)
-                           (a/<! chan-or-value#)
-                           chan-or-value#)]
+  (let [chan-or-value-gensym (gensym 'chan-or-value)]
+    `(let [~chan-or-value-gensym (try ~chan-or-value
+                                      (catch Throwable t#
+                                        t#))
+           value-or-error# (if (chan? ~chan-or-value-gensym)
+                             ~(join' chan-or-value-gensym)
+                             ~chan-or-value-gensym)]
+       value-or-error#)))
+
+(defmacro <<!
+  [chan-or-value]
+  (<<!' chan-or-value))
+
+(defn <<!!
+  [chan-or-value]
+  (if (chan? chan-or-value)
+    (loop [res (a/<!! chan-or-value)]
+      (if (chan? res)
+        (recur (a/<!! res))
+        res))
+    chan-or-value))
+
+(defn <<?'
+  [chan-or-value]
+  `(let [value-or-error# (<<! ~chan-or-value)]
      (if (error? value-or-error#)
        (throw value-or-error#)
        value-or-error#)))
 
-(defmacro <?
+(defmacro <<?
   [chan-or-value & body]
-  (first (implicit-try (cons (<?' chan-or-value) body))))
+  (first (implicit-try (cons (<<?' chan-or-value) body))))
+
+(defn <<??'
+  [chan-or-value]
+  `(let [value-or-error# (<<!! ~chan-or-value)]
+     (if (error? value-or-error#)
+       (throw value-or-error#)
+       value-or-error#)))
+
+(defmacro <<??
+  [chan-or-value & body]
+  (first (implicit-try (cons (<<??' chan-or-value) body))))
 
 (defprotocol AsyncExceptionDetails
   (register-ex-details [ex details])
@@ -107,14 +159,6 @@
         (register-ex-details cause [new-details])
         (register-ex-details cause (conj details new-details)))))
   cause)
-
-(defn error?
-  [v]
-  (instance? Throwable v))
-
-(defn chan?
-  [v]
-  (instance? ManyToManyChannel v))
 
 (defn clean-env-keys
   [env]
@@ -162,12 +206,7 @@
         line (:line form-meta)
         column (:column form-meta)]
     `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
-           chan-or-value# (try ~chan-or-value
-                               (catch Throwable t#
-                                 t#))
-           value-or-error# (if (chan? chan-or-value#)
-                             (a/<! chan-or-value#)
-                             chan-or-value#)]
+           value-or-error# (<<! ~chan-or-value)]
        (if (error? value-or-error#)
          (throw
           (ex-async
@@ -186,13 +225,24 @@
 
 (defn sleep
   [ms]
-  (go-async (<? (a/timeout ms))))
+  (go-async (a/<! (a/timeout ms))))
+
+(defn defer
+  [ms value-or-fn]
+  (go-async (a/<! (a/timeout ms)) (if (fn? value-or-fn)
+                                    (value-or-fn)
+                                    value-or-fn)))
 
 (defn timeout
-  [ms value-or-fn & args]
-  (go-async (<? (a/timeout ms)) (if (fn? value-or-fn)
-                                  (apply value-or-fn args)
-                                  value-or-fn)))
+  ([chan ms]
+   (timeout chan ms (TimeoutException. (str "Channel timed out: " ms "ms."))))
+  ([chan ms timed-out-value-or-fn]
+   (go-async (let [res (first (a/alts! [chan (defer ms ::timed-out)]))]
+               (if (= ::timed-out res)
+                 (if (fn? timed-out-value-or-fn)
+                   (timed-out-value-or-fn)
+                   timed-out-value-or-fn)
+                 res)))))
 
 (defn race
   [chans]
@@ -200,10 +250,7 @@
     (if (seq chans)
       (doseq [chan chans]
         (a/go
-          (let [res (try
-                      (<? chan)
-                      (catch Throwable t
-                        t))]
+          (let [res (<<! chan)]
             (resolve ret res))))
       (a/close! ret))
     ret))
@@ -218,10 +265,10 @@
           (vswap! attempt-chans
                   conj
                   (a/go
-                    (try
-                      (resolve ret (<? chan))
-                      (catch Throwable t
-                        t)))))
+                    (let [v (<<! chan)]
+                      (if (error? v)
+                        v
+                        (resolve ret v))))))
         (a/go
           (let [errors (a/<! (a/map vector @attempt-chans))]
             (when (every? error? errors)
@@ -237,9 +284,7 @@
   (go-async
    (loop [res [] chan (first chans) chans (next chans)]
      (if chan
-       (recur (conj res (try (<? chan)
-                             (catch Throwable t
-                               t)))
+       (recur (conj res (<<! chan))
               (first chans)
               (next chans))
        res))))
@@ -254,11 +299,10 @@
           (vswap! res-chans
                   conj
                   (a/go
-                    (try
-                      (<? chan)
-                      (catch Throwable t
-                        (resolve ret t)
-                        t)))))
+                    (let [v (<<! chan)]
+                      (if (error? v)
+                        (do (resolve ret v) v)
+                        v)))))
         (a/go
           (let [results (a/<! (a/map vector @res-chans))]
             (when-not (some error? results)
@@ -266,38 +310,94 @@
       (a/close! ret))
     ret))
 
-(defn catch
-  ([chan ex-handler]
-   (go-async
-    (<? chan)
-    (catch Throwable t
-      (ex-handler t))))
-  ([chan pred-or-type ex-handler]
-   (go-async
-    (<? chan)
-    (catch Throwable t
-      (cond (and (class? pred-or-type) (instance? pred-or-type t))
-            (ex-handler t)
-            (and (ifn? pred-or-type) (pred-or-type t))
-            (ex-handler t)
-            :else t)))))
+(do
+  (rcf/set-timeout! 210)
+  (tests
+    "Awaits all promise-chan in given seq and returns a vector of
+their results in order. Promise-chan obviously run concurrently,
+so the entire operation will take as long as the longest one."
+    (async
+     (! (await (all [1 (defer 100 2) (defer 200 3)]))))
+    % := [1 2 3])
 
-;; TODO: better way to write finally?
+  (rcf/set-timeout! 20)
+  (tests
+    "Short-circuits as soon as one promise-chan errors, returning
+the error."
+    (async
+     (try
+       (await (all [(defer 10 #(/ 1 0)) (defer 100 2) (defer 200 3)]))
+       (catch Exception e
+         (! e))))
+    (type %) := ArithmeticException)
+
+  (rcf/set-timeout! 1000)
+  (tests
+    "Can contain non-promise-chan as well."
+    (async
+     (! (await (all [1 2 3]))))
+    % := [1 2 3]
+
+    "But since all is not a macro, if one of them throw it throws
+immediately as the argument to all get evaluated."
+    (try (all [1 (defer 10 2) (/ 1 0)])
+         (catch Exception e
+           (! e)))
+    (type %) := ArithmeticException
+
+    "This is especially important when using some of the helper
+functions instead of plain async/await, because it will
+throw instead of all returning the error."
+    (try
+      (-> (all [1 (defer 10 2) (/ 1 0)])
+          (catch (! :this-wont-work)))
+      (catch Exception _
+        (! :this-will)))
+    % := :this-will
+
+    "If given an empty seq, returns a promise-chan resolved
+to nil."
+    (async
+     (! (await (all []))))
+    % := nil
+
+    "If given nil, returns a promise-chan resolved to nil."
+    (async
+     (! (await (all []))))
+    % := nil))
+
+(defn catch
+  ([chan error-handler]
+   (go-async
+    (let [v (<<! chan)]
+      (if (error? v)
+        (error-handler v)
+        v))))
+  ([chan pred-or-type error-handler]
+   (go-async
+    (let [v (<<! chan)]
+      (if (error? v)
+        (cond (and (class? pred-or-type) (instance? pred-or-type v))
+              (error-handler v)
+              (and (ifn? pred-or-type) (pred-or-type v))
+              (error-handler v)
+              :else v)
+        v)))))
+
 (defn finally
   [chan f]
   (go-async
-   (let [res (a/<! chan)]
-     (try
-       res
-       (finally
-         (if (error? res)
-           (f nil res)
-           (f res nil)))))))
+   (let [res (<<! chan)]
+     (f res)
+     res)))
 
 (defn then
   [chan f]
   (go-async
-   (f (<? chan))))
+   (let [v (<<! chan)]
+     (if (error? v)
+       v
+       (f v)))))
 
 (defn chain
   [chan & fs]
@@ -305,94 +405,88 @@
    (fn [chan f] (then chan f))
    chan fs))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Promise creation a la Promesa
-
-;; TODO: Not sure I want these included in async-style
-
-(defn promise?
-  [v]
-  (and (chan? v)
-       (instance? PromiseBuffer (.buf v))))
-
-(defn promise
-  [v]
-  (doto (a/promise-chan)
-    (resolve v)))
-
-(defn resolved
-  [v]
-  (promise v))
-
-(defn rejected
-  [v]
-  (promise v))
-
-(defn create
-  [f]
-  (let [ret (a/promise-chan)]
-    (let [resolve' #(resolve ret %)
-          reject' #(resolve ret %)]
-      (try (f resolve' reject')
-           (catch Throwable t
-             (reject' t))))
-    ret))
-
-(defn deferred
-  []
-  (a/promise-chan))
-
-(defn resolve!
-  ([p]
-   (resolve! p nil)
-   p)
-  ([p v]
-   (resolve p v)
-   p))
-
 (defmacro do!
+  ;;TODO: Improve the error reporting with ex-details of do!
   [& exprs]
   `(async
-    ~@(map #(do (println (meta %)) (list `await %)) exprs)))
+    ~@(map #(list `await %) exprs)))
 
-(-> (async (await (print 1))
-           (await (print 2))
-           (await (timeout 1000 #(print "OUTO")))
-           (await (println))
-           (await (/ 1 0))
-           (await 30))
-    (then (partial println "success:"))
-    (catch (comp clojure.pprint/pprint ex-details)))
+(defn handle
+  ([chan f]
+   (go-async
+    (let [v (<<! chan)]
+      (f v))))
+  ([chan ok-handler error-handler]
+   (go-async
+    (let [v (<<! chan)]
+      (if (error? v)
+        (error-handler v)
+        (ok-handler v))))))
 
-;; TODO: Debug why the ex-details above doesn't show the await specific error
+(defmacro alet
+  ;;TODO: Improve the error reporting with ex-details of alet
+  [bindings & exprs]
+  `(async
+    (clojure.core/let
+        [~@(mapcat
+            (fn [[sym val]] [`~sym `(await ~val)])
+            (partition 2 bindings))]
+      ~@exprs)))
 
-;;;; Promise creation a la Promesa
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(do
+  (rcf/set-timeout! 1000)
+  (tests
+    "Like Clojure's let, except each binding is awaited."
+    (com.xadecimal.async-style/alet
+     [a (defer 100 1)
+      b (defer 100 2)
+      c (defer 100 3)]
+     (! (+ a b c)))
+    % := 6)
 
-(defn foo
-  [n]
-  (async
-   (/ 1 n)))
+  (rcf/set-timeout! 200)
+  (tests
+    "Like Clojure's let, this is not parallel, the first binding is
+awaited, then the second, then the third, etc."
+    (com.xadecimal.async-style/alet
+     [a (defer 100 1)
+      b (defer 100 2)
+      c (defer 100 3)]
+     (! (+ a b c)))
+    % := ::rcf/timeout)
 
-(-> (async (await (foo 10)))
-    (catch ArithmeticException (constantly "arithmo"))
-    (catch clojure.lang.ExceptionInfo (constantly "excpetoinfodo"))
-    (chain inc inc inc)
-    (catch Exception identity)
-    (finally (fn [a b] (println [a b]))))
+  (rcf/set-timeout! 1000)
+  (tests
+    "Let bindings can depend on previous ones."
+    (com.xadecimal.async-style/alet
+     [a 1
+      b (defer 100 (+ a a))
+      c (inc b)]
+     (! c))
+    % := 3))
 
-#_(let [a (timeout 1000 (/ 1 0))
-        b (timeout 2000 2)]
-    (-> (all [a b])
-        (catch (constantly 1000000))
-        (then println)))
+(defmacro clet
+  [bindings & exprs]
+  ;;TODO: Improve the error reporting with ex-details of clet
+  (clojure.core/let [[new-bindings prior-syms-replace-map]
+                     (-> (reduce
+                          (fn [[acc prior-syms-replace-map] [sym val]]
+                            [(conj acc
+                                   [`~sym `(async ~(walk/postwalk-replace
+                                                    prior-syms-replace-map
+                                                    val))])
+                             (assoc prior-syms-replace-map sym `(await ~sym))])
+                          [[] {}]
+                          (partition 2 bindings)))]
+    `(clojure.core/let
+         [~@(apply concat new-bindings)]
+       (async
+        ~@(walk/postwalk-replace
+           prior-syms-replace-map
+           exprs)))))
 
-#_(a/go
-    (-> (all [(async :first-promise) (async (/ 1 0))])
-        (await)
-        (as-> [first-result second-result]
-            (println (str first-result ", " second-result)))))
-
-#_(a/go
-    (-> (await (any [(timeout 2000 2) (timeout 1000 1)]))
-        (println)))
+#_(<<??
+   (any
+    (for [i (range 100)]
+      (defer (rand-int 1000)
+        #(do (println i) i)))))
