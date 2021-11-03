@@ -8,9 +8,9 @@
             [hyperfiddle.rcf :as rcf :refer [! % tests]])
   (:import clojure.core.async.impl.channels.ManyToManyChannel
            java.util.Collections
-           java.util.concurrent.TimeoutException))
+           [java.util.concurrent CancellationException TimeoutException]))
 
-;; TODO: add support for cancellation, and make race and any and all auto-cancel
+;; TODO: add full test suite
 ;; TODO: add support for heavy CPU compute operations, and blocking IO operations
 ;; TODO: Add ClojureScript support
 ;; TODO: Check how it works with clojure.test and cljs.test, there is an async test function in cljs, but how would it work in Clojure?
@@ -35,10 +35,12 @@
 (defn resolve
   [chan v]
   (if (nil? v)
-    (a/close! chan)
     (do
-      (a/put! chan v)
-      (a/close! chan))))
+      (a/close! chan)
+      true)
+    (let [ret (a/offer! chan v)]
+      (a/close! chan)
+      ret)))
 
 (defn error?
   [v]
@@ -52,14 +54,37 @@
   [v]
   (instance? ManyToManyChannel v))
 
+(def ^:dynamic *cancellation-chan*)
+
+(defn cancelled-val?
+  [v]
+  (or (instance? CancellationException v)
+      (reduced? v)))
+
+(defn cancelled?
+  []
+  (if-let [v (a/poll! *cancellation-chan*)]
+    (cancelled-val? v)
+    false))
+
+(defn cancel
+  ([chan]
+   (when (chan? chan)
+     (resolve chan (CancellationException. "Operation was cancelled."))))
+  ([chan v]
+   (when (chan? chan)
+     (resolve chan (reduced v)))))
+
 (defmacro go-async
   [& body]
   `(let [ret# (a/promise-chan)]
      (a/go
-       (let [res# (try ~@(implicit-try body)
-                       (catch Throwable t#
-                         t#))]
-         (resolve ret# res#)))
+       (binding [*cancellation-chan* ret#]
+         (when-not (cancelled?)
+           (resolve ret#
+                    (try ~@(implicit-try body)
+                         (catch Throwable t#
+                           t#))))))
      ret#))
 
 (defn join'
@@ -180,17 +205,19 @@
     `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
            ret# (a/promise-chan)]
        (a/go
-         (let [res# (try ~@(implicit-try body)
-                         (catch Throwable t#
-                           (ex-async
-                            :msg ~error-msg
-                            :block :async
-                            :form ~form-str
-                            :form-env form-env#
-                            :line ~line
-                            :column ~column
-                            :cause t#)))]
-           (resolve ret# res#)))
+         (binding [*cancellation-chan* ret#]
+           (when-not (cancelled?)
+             (resolve ret#
+                      (try ~@(implicit-try body)
+                           (catch Throwable t#
+                             (ex-async
+                              :msg ~error-msg
+                              :block :async
+                              :form ~form-str
+                              :form-env form-env#
+                              :line ~line
+                              :column ~column
+                              :cause t#)))))))
        ret#)))
 
 (defmacro async
@@ -223,26 +250,86 @@
   [chan-or-value & body]
   (first (implicit-try (cons (await' &form &env chan-or-value) body))))
 
+(defn catch
+  ([chan error-handler]
+   (go-async
+    (let [v (<<! chan)]
+      (if (error? v)
+        (error-handler v)
+        v))))
+  ([chan pred-or-type error-handler]
+   (go-async
+    (let [v (<<! chan)]
+      (if (error? v)
+        (cond (and (class? pred-or-type) (instance? pred-or-type v))
+              (error-handler v)
+              (and (ifn? pred-or-type) (pred-or-type v))
+              (error-handler v)
+              :else v)
+        v)))))
+
+(defn finally
+  [chan f]
+  (go-async
+   (let [res (<<! chan)]
+     (f res)
+     res)))
+
+(defn then
+  [chan f]
+  (go-async
+   (let [v (<<! chan)]
+     (if (error? v)
+       v
+       (f v)))))
+
+(defn chain
+  [chan & fs]
+  (reduce
+   (fn [chan f] (then chan f))
+   chan fs))
+
+(defn handle
+  ([chan f]
+   (go-async
+    (let [v (<<! chan)]
+      (f v))))
+  ([chan ok-handler error-handler]
+   (go-async
+    (let [v (<<! chan)]
+      (if (error? v)
+        (error-handler v)
+        (ok-handler v))))))
+
 (defn sleep
   [ms]
   (go-async (a/<! (a/timeout ms))))
 
 (defn defer
+  ;; TODO: Improve error details message for defer
   [ms value-or-fn]
-  (go-async (a/<! (a/timeout ms)) (if (fn? value-or-fn)
-                                    (value-or-fn)
-                                    value-or-fn)))
+  (go-async (a/<! (a/timeout ms))
+            (when-not (cancelled?)
+              (if (fn? value-or-fn)
+                (value-or-fn)
+                value-or-fn))))
 
 (defn timeout
+  ;; TODO: Improve error details message for timeout
   ([chan ms]
    (timeout chan ms (TimeoutException. (str "Channel timed out: " ms "ms."))))
   ([chan ms timed-out-value-or-fn]
-   (go-async (let [res (first (a/alts! [chan (defer ms ::timed-out)]))]
-               (if (= ::timed-out res)
-                 (if (fn? timed-out-value-or-fn)
-                   (timed-out-value-or-fn)
-                   timed-out-value-or-fn)
-                 res)))))
+   (go-async (let [deferred (defer ms ::timed-out)
+                   res (first (a/alts! [chan deferred]))]
+               (cond (= ::timed-out res)
+                     (do
+                       (cancel chan)
+                       (if (fn? timed-out-value-or-fn)
+                         (timed-out-value-or-fn)
+                         timed-out-value-or-fn))
+                     :else
+                     (do (cancel deferred)
+                         res))))))
 
 (defn race
   [chans]
@@ -251,8 +338,9 @@
       (doseq [chan chans]
         (a/go
           (let [res (<<! chan)]
-            (resolve ret res))))
-      (a/close! ret))
+            (and (resolve ret res)
+                 (run! #(when-not (= chan %) (cancel %)) chans)))))
+      (resolve ret nil))
     ret))
 
 (defn any
@@ -268,7 +356,8 @@
                     (let [v (<<! chan)]
                       (if (error? v)
                         v
-                        (resolve ret v))))))
+                        (and (resolve ret v)
+                             (run! #(when-not (= chan %) (cancel %)) chans)))))))
         (a/go
           (let [errors (a/<! (a/map vector @attempt-chans))]
             (when (every? error? errors)
@@ -276,7 +365,7 @@
                             "All chans returned errors"
                             {:block :any
                              :errors errors}))))))
-      (a/close! ret))
+      (resolve ret nil))
     ret))
 
 (defn all-settled
@@ -301,7 +390,9 @@
                   (a/go
                     (let [v (<<! chan)]
                       (if (error? v)
-                        (do (resolve ret v) v)
+                        (do (and (resolve ret v)
+                                 (run! #(when-not (= chan %) (cancel %)) chans))
+                            v)
                         v)))))
         (a/go
           (let [results (a/<! (a/map vector @res-chans))]
@@ -366,62 +457,11 @@ to nil."
      (! (await (all []))))
     % := nil))
 
-(defn catch
-  ([chan error-handler]
-   (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        (error-handler v)
-        v))))
-  ([chan pred-or-type error-handler]
-   (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        (cond (and (class? pred-or-type) (instance? pred-or-type v))
-              (error-handler v)
-              (and (ifn? pred-or-type) (pred-or-type v))
-              (error-handler v)
-              :else v)
-        v)))))
-
-(defn finally
-  [chan f]
-  (go-async
-   (let [res (<<! chan)]
-     (f res)
-     res)))
-
-(defn then
-  [chan f]
-  (go-async
-   (let [v (<<! chan)]
-     (if (error? v)
-       v
-       (f v)))))
-
-(defn chain
-  [chan & fs]
-  (reduce
-   (fn [chan f] (then chan f))
-   chan fs))
-
 (defmacro do!
   ;;TODO: Improve the error reporting with ex-details of do!
   [& exprs]
   `(async
     ~@(map #(list `await %) exprs)))
-
-(defn handle
-  ([chan f]
-   (go-async
-    (let [v (<<! chan)]
-      (f v))))
-  ([chan ok-handler error-handler]
-   (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        (error-handler v)
-        (ok-handler v))))))
 
 (defmacro alet
   ;;TODO: Improve the error reporting with ex-details of alet
@@ -485,8 +525,19 @@ awaited, then the second, then the third, etc."
            prior-syms-replace-map
            exprs)))))
 
+
 #_(<<??
-   (any
-    (for [i (range 100)]
-      (defer (rand-int 1000)
-        #(do (println i) i)))))
+   (let [run-count (atom 0)
+         chans (for [i (range 100)]
+                 (async (do (swap! run-count inc) i)))]
+     (mapv #(cancel % :cancel) (drop 1 chans))
+     (let [res (race chans)]
+       (Thread/sleep 1100)
+       (println "Run-count: " @run-count)
+       res)))
+
+#_(let [a (defer 110 #(do (println :a) :a))
+        b (defer 100 #(do (println :b) :b))
+        c (defer 80 #(do (println :c) (/ 1 0)))]
+    #_(defer 60 #(cancel b :foo))
+    (<<?? (all [a b c])))
