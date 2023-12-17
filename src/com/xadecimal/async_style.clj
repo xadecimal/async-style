@@ -30,7 +30,7 @@
 ;; TODO: Think if cancelled? should change so instead of returning true/false, it throws if cancelled
 
 (def ^:private compute-pool
-  "the clojure.core Agent pooledExecutor, it is fixed size bounded to cou cores
+  "the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores
    + 2 and pre-allocated, use it for heavy computation, don't block it"
   Agent/pooledExecutor) ; Fixed bounded to cpu core + 2 and pre-allocated
 (def ^:private blocking-pool
