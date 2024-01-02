@@ -1,17 +1,14 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.1"}
-        org.clojure/core.async {:mvn/version "1.5.648"}
+        org.clojure/core.async {:mvn/version "1.6.681"}
         criterium/criterium {:mvn/version "RELEASE"}
-        hyperfiddle/rcf {:git/url "https://github.com/hyperfiddle/rcf.git" :sha "cceb39d6db28a7bcd3c496fe3aff5961babe5b70"}
-        http-kit/http-kit {:mvn/version "2.5.3"}
-        com.clojure-goes-fast/clj-async-profiler {:mvn/version "0.5.1"}
-        com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.1"}}
+        http-kit/http-kit {:mvn/version "2.7.0"}
+        com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.1.1"}
+        com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.4"}}
  :aliases
  {:test {:extra-paths ["test"]
-         :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.0" :git/sha "48c3c67"}}
-         :jvm-opts ["-Dhyperfiddle.rcf.generate-tests=true"
-                    "-XX:-OmitStackTraceInFastThrow"]
+         :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :exec-fn cognitect.test-runner.api/test
-         :exec-args {:dirs ["src" "test"]
+         :exec-args {:dirs ["test"]
                      :patterns ["com.xadecimal.async-style.*"]}}
-  :dev {:extra-paths ["dev"]}}}
+  :dev {:extra-paths ["dev" "test"]}}}

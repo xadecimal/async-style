@@ -1,0 +1,4 @@
+{:min-bb-version "0.4.0"
+ :tasks
+ {test {:doc "Run clojure.test tests."
+        :task (shell "clojure -X:test")}}}

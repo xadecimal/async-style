@@ -15,7 +15,6 @@
             [clojure.core.async :as a]
             [clojure.walk :as walk]
             [criterium.core :as cr]
-            [hyperfiddle.rcf :as rcf :refer [! % tests]]
             [clojure.core.async.impl.dispatch :as d])
   (:import clojure.core.async.impl.channels.ManyToManyChannel
            java.util.Collections
@@ -66,7 +65,7 @@
               ~@(when finally
                   [finally]))]))))
 
-(defn settle
+(defn- settle
   "Puts v into chan if it is possible to do so immediately (uses offer!) and
    closes chan. If v is nil it will just close chan. Returns true if offer! of v
    in chan succeeded or v was nil, false otherwise."
@@ -95,7 +94,7 @@
   [v]
   (not (error? v)))
 
-(defn chan?
+(defn- chan?
   "Returns true if v is a core.async channel, false otherwise."
   [v]
   (instance? ManyToManyChannel v))
@@ -154,7 +153,7 @@
      (settle chan (CancellationException. "Operation was cancelled."))))
   ([chan v]
    (when (chan? chan)
-     (settle chan (reduced v)))))
+     (settle chan (ensure-reduced v)))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -186,20 +185,21 @@
    support for cancellation, implicit-try, and returning a promise-chan settled
    with the result or any exception thrown."
   [body execution-type]
-  `(let [ret# (a/promise-chan)]
-     (~(case execution-type
-         :blocking `a/thread
-         :async `a/go
-         :compute `compute')
-      (binding [*cancellation-chan* ret#]
-        (when-not (cancelled?)
-          (settle ret#
-                  (try ~@(implicit-try body)
-                       (catch Throwable t#
-                         t#))))))
-     ret#))
+  (let [settle- settle]
+    `(let [ret# (a/promise-chan)]
+       (~(case execution-type
+           :blocking `a/thread
+           :async `a/go
+           :compute `compute')
+        (binding [*cancellation-chan* ret#]
+          (when-not (cancelled?)
+            (~settle- ret#
+             (try ~@(implicit-try body)
+                  (catch Throwable t#
+                    t#))))))
+       ret#)))
 
-(defmacro go-async
+(defmacro ^:private go-async
   "Asynchronously execute body on the async-pool with support for cancellation,
    implicit-try, and returning a promise-chan settled with the result or any
    exception thrown.
@@ -209,7 +209,7 @@
   [& body]
   (go-async' body :async))
 
-(defmacro go-blocking
+(defmacro ^:private go-blocking
   "Asynchronously execute body on the blocking-pool with support for
    cancellation, implicit-try, and returning a promise-chan settled with the
    result or any exception thrown.
@@ -219,7 +219,7 @@
   [& body]
   (go-async' body :blocking))
 
-(defmacro go-compute
+(defmacro ^:private go-compute
   "Asynchronously execute body on the compute-pool with support for
    cancellation, implicit-try, and returning a promise-chan settled with the
    result or any exception thrown.
@@ -235,21 +235,23 @@
   "Parking take from chan, but if result taken is still a chan?, further parking
    take from it, repeating until first non chan? result and return it."
   [chan]
-  `(loop [res# (a/<! ~chan)]
-     (if (chan? res#)
-       (recur (a/<! res#))
-       res#)))
+  (let [chan?- chan?]
+    `(loop [res# (a/<! ~chan)]
+       (if (~chan?- res#)
+         (recur (a/<! res#))
+         res#))))
 
 (defn- <<!'
   "Wraps chan-or-value so that if chan it joins from it returning the joined
    result, else if value it returns value directly, or if chan-or-value throws it
    returns the thrown exception."
   [chan-or-value]
-  (let [chan-or-value-gensym (gensym 'chan-or-value)]
+  (let [chan-or-value-gensym (gensym 'chan-or-value)
+        chan?- chan?]
     `(let [~chan-or-value-gensym (try ~chan-or-value
                                       (catch Throwable t#
                                         t#))
-           value-or-error# (if (chan? ~chan-or-value-gensym)
+           value-or-error# (if (~chan?- ~chan-or-value-gensym)
                              ~(join' chan-or-value-gensym)
                              ~chan-or-value-gensym)]
        value-or-error#)))
@@ -347,7 +349,7 @@
   (when (satisfies? AsyncExceptionDetails ex)
     (get-ex-details ex)))
 
-(defn ex-async
+(defn- ex-async
   "Create and register a new asynchronous exception details."
   [& {:keys [msg block form form-env line column cause]}]
   (locking cause
@@ -385,7 +387,7 @@
        (remove #(re-find #"inst_" %))
        (map symbol)))
 
-(defn async'
+(defn- async'
   "Wraps body in a way that it executes in an async or blocking block with
    support for cancellation, implicit-try, as well as asynchronous exception
    details capture, and returning a promise-chan settled with the result or any
@@ -396,7 +398,9 @@
         form-meta (meta form)
         clean-env-k (clean-env-keys env)
         line (:line form-meta)
-        column (:column form-meta)]
+        column (:column form-meta)
+        ex-async- ex-async
+        settle- settle]
     `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
            ret# (a/promise-chan)]
        (~(case execution-type
@@ -405,17 +409,17 @@
            :compute `compute')
         (binding [*cancellation-chan* ret#]
           (when-not (cancelled?)
-            (settle ret#
-                    (try ~@(implicit-try body)
-                         (catch Throwable t#
-                           (ex-async
-                            :msg ~error-msg
-                            :block :async
-                            :form ~form-str
-                            :form-env form-env#
-                            :line ~line
-                            :column ~column
-                            :cause t#)))))))
+            (~settle- ret#
+             (try ~@(implicit-try body)
+                  (catch Throwable t#
+                    (~ex-async-
+                     :msg ~error-msg
+                     :block :async
+                     :form ~form-str
+                     :form-env form-env#
+                     :line ~line
+                     :column ~column
+                     :cause t#)))))))
        ret#)))
 
 (defmacro async
@@ -460,12 +464,13 @@
         form-meta (meta form)
         clean-env-k (clean-env-keys env)
         line (:line form-meta)
-        column (:column form-meta)]
+        column (:column form-meta)
+        ex-async- ex-async]
     `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
            value-or-error# (<<! ~chan-or-value)]
        (if (error? value-or-error#)
          (throw
-          (ex-async
+          (~ex-async-
            :msg ~error-msg
            :block :await
            :form ~form-str
@@ -505,20 +510,20 @@
    respectively."
   ([chan error-handler]
    (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        (error-handler v)
-        v))))
+     (let [v (<<! chan)]
+       (if (error? v)
+         (error-handler v)
+         v))))
   ([chan pred-or-type error-handler]
    (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        (cond (and (class? pred-or-type) (instance? pred-or-type v))
-              (error-handler v)
-              (and (ifn? pred-or-type) (pred-or-type v))
-              (error-handler v)
-              :else v)
-        v)))))
+     (let [v (<<! chan)]
+       (if (error? v)
+         (cond (and (class? pred-or-type) (instance? pred-or-type v))
+               (error-handler v)
+               (and (ifn? pred-or-type) (pred-or-type v))
+               (error-handler v)
+               :else v)
+         v)))))
 
 (defn finally
   "Parking takes fully joined value from chan, and calls f with it no matter if
@@ -531,9 +536,9 @@
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
   (go-async
-   (let [res (<<! chan)]
-     (f res)
-     res)))
+    (let [res (<<! chan)]
+      (f res)
+      res)))
 
 (defn then
   "Asynchronously executes f with the result of chan once available, unless chan
@@ -545,10 +550,10 @@
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
   (go-async
-   (let [v (<<! chan)]
-     (if (error? v)
-       v
-       (f v)))))
+    (let [v (<<! chan)]
+      (if (error? v)
+        v
+        (f v)))))
 
 (defn chain
   "Chains multiple then together starting with chan like:
@@ -577,14 +582,14 @@
    blocking or compute respectively."
   ([chan f]
    (go-async
-    (let [v (<<! chan)]
-      (f v))))
+     (let [v (<<! chan)]
+       (f v))))
   ([chan ok-handler error-handler]
    (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        (error-handler v)
-        (ok-handler v))))))
+     (let [v (<<! chan)]
+       (if (error? v)
+         (error-handler v)
+         (ok-handler v))))))
 
 (defn sleep
   "Asynchronously sleep ms time, returns a promise-chan which settles after ms
@@ -704,65 +709,12 @@
    any of them returning an error?."
   [chans]
   (go-async
-   (loop [res [] chan (first chans) chans (next chans)]
-     (if chan
-       (recur (conj res (<<! chan))
-              (first chans)
-              (next chans))
-       res))))
-
-(rcf/tests
-  "all-settled returns a promise-chan settled with a vector of the taken values
-   from all chans once they all fulfill"
-  (-> (all-settled [(async 1) (async 1) (async 1)])
-      (handle !))
-  % := [1 1 1]
-
-  "This is true even if any of the chan fulfills with an error."
-  (let [error (ex-info "error" {})]
-    (-> (all-settled [(async 1) (async (throw error)) (async 1)])
-        (handle !))
-    % := [1 error 1])
-
-  "Or even if all of them fulfill with an error."
-  (let [error (ex-info "error" {})]
-    (-> (all-settled [(async (throw error)) (async (throw error)) (async (throw error))])
-        (handle !))
-    % := [error error error])
-
-  "Passing an empty seq will return a promise-chan settled with an
-   empty vector."
-  (-> (all-settled [])
-      (handle !))
-  % := []
-
-  "Same with passing nil, it will return a promise-chan settled with an
-   empty vector."
-  (-> (all-settled nil)
-      (handle !))
-  % := []
-
-  "The returned promise-chan will always contain a vector? even if chans isn't
-   one."
-  (-> (all-settled (list (async 1) (async 1) (async 1)))
-      (handle !))
-  % := [1 1 1]
-
-  "chans can contain values as well as channels, in which case they
-   will be treated as an already settled chan which returns itself."
-  (-> (all-settled [1 2 (async 1)])
-      (handle !))
-  % := [1 2 1]
-
-  "The order of the taken values in the vector settled into the returned
-   promise-chan are guaranteed to correspond to the same order as the chans.
-   Thus order can be relied upon."
-  (every?
-   #(= [1 2 3 4 5 6 7 8 9 10] %)
-   (doall
-    (for [i (range 3000)]
-      (-> (all-settled [1 (async 2) 3 (async 4) (async 5) 6 (async 7) 8 9 (async 10)])
-          (<<??))))) := true)
+    (loop [res [] chan (first chans) chans (next chans)]
+      (if chan
+        (recur (conj res (<<! chan))
+               (first chans)
+               (next chans))
+        res))))
 
 (defn all
   "Takes a seqable of chans as an input, and returns a promise-chan that settles
@@ -802,17 +754,17 @@
    settles with the result of the last expression when the entire do! is done."
   [& exprs]
   `(async
-    ~@(map #(list `await %) exprs)))
+     ~@(map #(list `await %) exprs)))
 
 (defmacro alet
   ;;TODO: Improve the error reporting with ex-details of alet
   [bindings & exprs]
   `(async
-    (clojure.core/let
-        [~@(mapcat
-            (fn [[sym val]] [`~sym `(await ~val)])
-            (partition 2 bindings))]
-      ~@exprs)))
+     (clojure.core/let
+         [~@(mapcat
+             (fn [[sym val]] [`~sym `(await ~val)])
+             (partition 2 bindings))]
+       ~@exprs)))
 
 (defmacro clet
   [bindings & exprs]
@@ -830,34 +782,35 @@
     `(clojure.core/let
          [~@(apply concat new-bindings)]
        (async
-        ~@(walk/postwalk-replace
-           prior-syms-replace-map
-           exprs)))))
+         ~@(walk/postwalk-replace
+            prior-syms-replace-map
+            exprs)))))
 
 (defmacro time
   "Evaluates expr and prints the time it took. Returns the value of expr. If
    expr evaluates to a channel, it waits for channel to fulfill before printing
    the time it took."
   [expr]
-  `(let [start# (System/nanoTime)
-         prn-time-fn# (fn prn-time-fn#
-                        ([~'_] (prn-time-fn#))
-                        ([] (prn (str "Elapsed time: " (/ (double (- (System/nanoTime) start#)) 1000000.0) " msecs"))))
-         ret# ~expr]
-     (if (chan? ret#)
-       (-> ret# (handle prn-time-fn#))
-       (prn-time-fn#))
-     ret#))
+  (let [chan?- chan?]
+    `(let [start# (System/nanoTime)
+           prn-time-fn# (fn prn-time-fn#
+                          ([~'_] (prn-time-fn#))
+                          ([] (prn (str "Elapsed time: " (/ (double (- (System/nanoTime) start#)) 1000000.0) " msecs"))))
+           ret# ~expr]
+       (if (~chan?- ret#)
+         (-> ret# (handle prn-time-fn#))
+         (prn-time-fn#))
+       ret#)))
 
 #_(<<??
-   (let [run-count (atom 0)
-         chans (for [i (range 100)]
-                 (async (do (swap! run-count inc) i)))]
-     (mapv #(cancel % :cancel) (drop 1 chans))
-     (let [res (race chans)]
-       (Thread/sleep 1100)
-       (println "Run-count: " @run-count)
-       res)))
+      (let [run-count (atom 0)
+            chans (for [i (range 100)]
+                    (async (do (swap! run-count inc) i)))]
+        (mapv #(cancel % :cancel) (drop 1 chans))
+        (let [res (race chans)]
+          (Thread/sleep 1100)
+          (println "Run-count: " @run-count)
+          res)))
 
 #_(let [a (defer 110 #(do (println :a) :a))
         b (defer 100 #(do (println :b) :b))
@@ -894,28 +847,28 @@
 
 #_(->
    (do!
-    (blocking (blocking-io))
-    (blocking (blocking-io))
-    (blocking (blocking-io))
-    (blocking (blocking-io))
-    (blocking (blocking-io))
-    (non-blocking-io)
-    (non-blocking-io)
-    (non-blocking-io)
-    (non-blocking-io))
+     (blocking (blocking-io))
+     (blocking (blocking-io))
+     (blocking (blocking-io))
+     (blocking (blocking-io))
+     (blocking (blocking-io))
+     (non-blocking-io)
+     (non-blocking-io)
+     (non-blocking-io)
+     (non-blocking-io))
    (time)
    (catch #(clojure.pprint/pprint (ex-details %))))
 
 #_(->
    (do!
-    (blocking-io)
-    (blocking-io)
-    (blocking-io)
-    (blocking-io)
-    (blocking-io)
-    (non-blocking-io)
-    (non-blocking-io)
-    (non-blocking-io)
-    (non-blocking-io))
+     (blocking-io)
+     (blocking-io)
+     (blocking-io)
+     (blocking-io)
+     (blocking-io)
+     (non-blocking-io)
+     (non-blocking-io)
+     (non-blocking-io)
+     (non-blocking-io))
    (time)
    (catch #(clojure.pprint/pprint (ex-details %))))

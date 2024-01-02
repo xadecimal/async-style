@@ -1,287 +1,782 @@
 (ns com.xadecimal.async-style-test
   (:refer-clojure :exclude [await time])
-  (:require [hyperfiddle.rcf :as rcf :refer [! % tests]]
-            [com.xadecimal.async-style :as a :refer :all]))
-
-;;;;;;;;;;;;;
-;;;; all ;;;;
-
-(do
-  (rcf/set-timeout! 210)
-  (tests
-    "Awaits all promise-chan in given seq and returns a vector of
-their results in order. Promise-chan obviously run concurrently,
-so the entire operation will take as long as the longest one."
-    (async
-     (! (await (all [1 (defer 100 2) (defer 200 3)]))))
-    % := [1 2 3])
-
-  (rcf/set-timeout! 50)
-  (tests
-    "Short-circuits as soon as one promise-chan errors, returning
-the error."
-    (async
-     (try
-       (await (all [(defer 10 #(/ 1 0)) (defer 100 2) (defer 200 3)]))
-       (catch Exception e
-         (! e))))
-    (type %) := ArithmeticException)
-
-  (rcf/set-timeout! 1000)
-  (tests
-    "Can contain non-promise-chan as well."
-    (async
-     (! (await (all [1 2 3]))))
-    % := [1 2 3]
-
-    "But since all is not a macro, if one of them throw it throws
-immediately as the argument to all get evaluated."
-    (try (all [1 (defer 10 2) (/ 1 0)])
-         (catch Exception e
-           (! e)))
-    (type %) := ArithmeticException
-
-    "This is especially important when using some of the helper
-functions instead of plain async/await, because it will
-throw instead of all returning the error."
-    (try
-      (-> (all [1 (defer 10 2) (/ 1 0)])
-          (catch (! :this-wont-work)))
-      (catch Exception _
-        (! :this-will)))
-    % := :this-will
-
-    "If given an empty seq, returns a promise-chan settled
-to nil."
-    (async
-     (! (await (all []))))
-    % := nil
-
-    "If given nil, returns a promise-chan settled to nil."
-    (async
-     (! (await (all []))))
-    % := nil))
-
-;;;; all ;;;;
-;;;;;;;;;;;;;
+  (:require [clojure.test :refer [deftest is]]
+            [com.xadecimal.async-style :as a :refer :all]
+            [com.xadecimal.async-style-test-utils :refer [testa q! dq!]])
+  (:import [java.lang AssertionError]
+           [java.util.concurrent CancellationException]
+           [clojure.core.async.impl.channels ManyToManyChannel]))
 
 
-;;;;;;;;;;;;;;
-;;;; alet ;;;;
+(deftest error?-tests
+  (testa "Tests if something is considered an async-style error."
+         (is (error? (ex-info "" {})))
+         (is (not (error? 10))))
 
-(do
-  (rcf/set-timeout! 1000)
-  (tests
-   "Like Clojure's let, except each binding is awaited."
-   (com.xadecimal.async-style/alet
-    [a (defer 100 1)
-     b (defer 100 2)
-     c (defer 100 3)]
-    (! (+ a b c)))
-   % := 6)
-
-  (rcf/set-timeout! 200)
-  (tests
-   "Like Clojure's let, this is not parallel, the first binding is
-awaited, then the second, then the third, etc."
-   (com.xadecimal.async-style/alet
-    [a (defer 100 1)
-     b (defer 100 2)
-     c (defer 100 3)]
-    (! (+ a b c)))
-   % := ::rcf/timeout)
-
-  (rcf/set-timeout! 1000)
-  (tests
-   "Let bindings can depend on previous ones."
-   (com.xadecimal.async-style/alet
-    [a 1
-     b (defer 100 (+ a a))
-     c (inc b)]
-    (! c))
-   % := 3))
-
-;;;; alet ;;;;
-;;;;;;;;;;;;;;
+  (testa "All Throwables are considered async-style errors, and will count as an
+error when returned by an async block, or any promise-chan."
+         (is (error? (try (throw (Throwable.))
+                          (catch Throwable t
+                            t))))))
 
 
-;;;;;;;;;;;;;;
-;;;; race ;;;;
+(deftest ok?-tests
+  (testa "Tests if something is not an async-style error?"
+         (is (ok? 10))
+         (is (ok? "hello"))
+         (is (ok? :error))
+         (is (not (ok? (try (throw (Throwable.))
+                            (catch Throwable t
+                              t)))))))
 
-(rcf/tests
-  "Race returns the first chan to fulfill."
-  (-> (race [(defer 100 1) (defer 100 2) (async 3)])
-      (handle !))
-  % := 3
 
-  "If the first chan to fulfill does so with an error?, it still
+(deftest cancelled?-tests
+  (testa "Async-style supports cancellation, you have to explicitly check for
+cancelled? inside your async blocks."
+         (-> (async (loop [i 100 acc 0]
+                      (if (or (pos? i) (cancelled?))
+                        (recur (dec i) (+ acc i))
+                        acc)))
+             (handle q!))
+         (is (= 5050 (dq!))))
+
+  (testa "When used outside an async block, it throws."
+         (is (thrown? IllegalArgumentException (cancelled?))))
+
+  (testa "Returns true if cancelled."
+         (let [promise-chan (async (Thread/sleep 60)
+                                   (q! (cancelled?)))]
+           (Thread/sleep 30)
+           (cancel promise-chan))
+         (is (dq!)))
+
+  (testa "False otherwise."
+         (async (q! (cancelled?)))
+         (is (not (dq!)))))
+
+
+(deftest cancel-tests
+  (testa "You can use cancel to cancel an async block, this is best effort.
+If the block has not started executing yet, it will cancel, otherwise it
+needs to be the async block explicitly checks for cancelled? at certain
+points in time and short-circuit/interrupt, or cancel will not be able to
+actually cancel."
+         (let [promise-chan (async "I am cancelled")]
+           (cancel promise-chan)
+           (is (= CancellationException (type (<<!! promise-chan))))))
+
+  (testa "If the block has started executing, it won't cancel without explicit
+cancellation? check."
+         (let [promise-chan (async "I am not cancelled")]
+           (Thread/sleep 30)
+           (cancel promise-chan)
+           (is (= "I am not cancelled" (<<!! promise-chan)))))
+
+  (testa "If the block checks for cancellation explicitly, it can still be
+cancelled."
+         (let [promise-chan (async (Thread/sleep 100)
+                                   "I am cancelled")]
+           (Thread/sleep 30)
+           (cancel promise-chan)
+           (is (= CancellationException (type (<<!! promise-chan))))))
+
+  (testa "A value can be specified when cancelling, which is returned by the
+promise-chan of the async block instead of returning a CancellationException.
+Note that it is returned wrapped inside a reduced to indicate the short-circuiting."
+         (let [promise-chan (async (Thread/sleep 100)
+                                   "I am cancelled")]
+           (Thread/sleep 30)
+           (cancel promise-chan "We had to cancel this.")
+           (is (reduced? (<<!! promise-chan)))
+           (is (= "We had to cancel this." @(<<!! promise-chan)))))
+
+  (testa "It will not wrap a given reduced in another reduced, effectively it
+behaves like ensure-reduced."
+         (let [promise-chan (async (Thread/sleep 100)
+                                   "I am cancelled")]
+           (Thread/sleep 30)
+           (cancel promise-chan (reduced "We had to cancel this."))
+           (is (reduced? (<<!! promise-chan)))
+           (is (= "We had to cancel this." @(<<!! promise-chan))))))
+
+
+(deftest <<!-tests
+  (testa "Takes a value from a chan."
+         (async
+           (q! (<<! (async "Hello!"))))
+         (is (= "Hello!" (dq!))))
+
+  (testa "Parks if none are available yet, resumes only once a value is available."
+         (async
+           (let [pc (async (Thread/sleep 100)
+                           "This will only have a value after 100ms")]
+             (q! (System/currentTimeMillis))
+             (q! (<<! pc))
+             (q! (System/currentTimeMillis))))
+         (let [before-time (dq!)
+               ret (dq!)
+               after-time (dq!)]
+           (is (>= (- after-time before-time) 100))
+           (is (= "This will only have a value after 100ms" ret))))
+
+  (testa "Throws if used outside an async block"
+         (is (thrown? AssertionError (<<! (async)))))
+
+  (testa "Works on values as well, will just return it immediately."
+         (async (q! (<<! :a-value))
+                (q! (<<! 1))
+                (q! (<<! ["a" "b"]))
+                (q! (System/currentTimeMillis))
+                (q! (<<! :a-value))
+                (q! (System/currentTimeMillis)))
+         (is (= :a-value (dq!)))
+         (is (= 1 (dq!)))
+         (is (= ["a" "b"] (dq!)))
+         (let [before-time (dq!)
+               _ (dq!)
+               after-time (dq!)]
+           (is (<= (- after-time before-time) 1))))
+
+  (testa "If an exception is returned by chan, it will return the exception,
+it won't throw."
+         (async
+           (q! (<<! (async (/ 1 0)))))
+         (is (= ArithmeticException (type (dq!)))))
+
+  (testa "Taken value will be fully joined. That means if the value taken is
+itself a chan, <<! will also take from it, until it eventually takes a non chan
+value."
+         (async
+           (q! (<<! (async (async (async 1))))))
+         (is (= 1 (dq!)))))
+
+
+(deftest <<!!-tests
+  (testa "Takes a value from a chan."
+         (is (= "Hello!" (<<!! (async "Hello!")))))
+
+  (testa "Blocks if none are available yet, resumes only once a value is available."
+         (let [pc (async (Thread/sleep 100)
+                         "This will only have a value after 100ms")
+               before-time (System/currentTimeMillis)
+               ret (<<!! pc)
+               after-time (System/currentTimeMillis)]
+           (is (>= (- after-time before-time) 100))
+           (is (= "This will only have a value after 100ms" ret))))
+
+  (testa "Should not be used inside an async block, since it will block instead
+of parking."
+         (async (q! (<<!! (async "Don't do this even though it works."))))
+         (is (= "Don't do this even though it works." (dq!))))
+
+  (testa "Works on values as well, will just return it immediately."
+         (is (= :a-value (<<!! :a-value)))
+         (is (= 1 (<<!! 1)))
+         (is (= ["a" "b"] (<<!! ["a" "b"])))
+         (let [before-time (System/currentTimeMillis)
+               _ (<<!! :a-value)
+               after-time (System/currentTimeMillis)]
+           (is (<= (- after-time before-time) 1))))
+
+  (testa "If an exception is returned by chan, it will return the exception,
+it won't throw."
+         (is (= ArithmeticException (type (<<!! (async (/ 1 0)))))))
+
+  (testa "Taken value will be fully joined. That means if the value taken is
+itself a chan, <<!! will also take from it, until it eventually takes a non chan
+value."
+         (is (= 1 (<<!! (async (async (async 1))))))))
+
+
+(deftest <<?-tests)
+
+
+(deftest <<??-tests)
+
+
+(deftest ex-details-tests)
+
+
+(deftest ex-async-tests)
+
+
+(deftest async-tests
+  (testa "Async is used to run some code asynchronously on the async-pool."
+         (-> (async (+ 1 2))
+             (handle q!))
+         (is (= 3 (dq!))))
+
+  (testa "It wraps any form, so even a single value works."
+         (-> (async 1)
+             (handle q!))
+         (is (= 1 (dq!))))
+
+  (testa "You can use it to create async functions, by wrapping the fn body with it."
+         (-> ((fn fetch-data [] (async :data)))
+             (handle q!))
+         (is (= :data (dq!))))
+
+  (testa "The function can return anything."
+         (-> ((fn fetch-data [] (async (map inc [1 2 3]))))
+             (handle q!))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "You can freely throw inside async, the exception will be returned as a value."
+         (-> (async (throw (ex-info "Error fetching data" {})))
+             (handle q!))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "This works for async functions as well."
+         (-> ((fn fetch-data [] (async (throw (ex-info "Error fetching data" {})))))
+             (handle q!))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "Async returns a promise-chan immediately, and does not block."
+         (let [t1 (System/currentTimeMillis)
+               chan (async (Thread/sleep 1000) :done)
+               t2 (System/currentTimeMillis)]
+           (is (= ManyToManyChannel (type chan)))
+           (is (< (- t2 t1) 100))
+           (handle chan q!)
+           (is (= :done (dq! 2000)))))
+
+  (testa "Async supports implicit-try, meaning you can catch/finally on it as you would
+with try/catch/finally. It's similar to if you always wrapped the inside in a try."
+         (-> (async (/ 1 0)
+                    (catch ArithmeticException e
+                      0))
+             (handle q!))
+         (is (= 0 (dq!))))
+
+  (testa "Async example of implicit-try with a finally."
+         (-> (async (+ 1 1)
+                    (finally (q! :finally-called)))
+             (handle q!))
+         (is (= :finally-called (dq!)))
+         (is (= 2 (dq!))))
+
+  (testa "Or with catch and finally together."
+         (-> (async (/ 1 0)
+                    (catch ArithmeticException e
+                      (q! :catch-called)
+                      0)
+                    (finally (q! :finally-called)))
+             (handle q!))
+         (is (= :catch-called (dq!)))
+         (is (= :finally-called (dq!)))
+         (is (= 0 (dq!))))
+
+  (testa "Async block can be cancelled, they will skip their execution if cancelled
+before they begin executing."
+         (cancel (async (q! :will-timeout-due-to-cancel)))
+         (is (= :timeout (dq!))))
+
+  (testa "If you plan on doing lots of work, and want to support it being cancellable,
+you can explictly check for cancellation to interupt your work. By default a
+cancelled async block returns a CancellationException."
+         (let [work (async (loop [i 0]
+                             (when-not (cancelled?)
+                               (recur (inc i)))))]
+           (Thread/sleep 5)
+           (cancel work)
+           (handle work q!))
+         (is (= CancellationException (type (dq! 50)))))
+
+  (testa "You can explicitly set a value when cancelling, and the cancelled async
+chan will return a (reduced value) of the value instead of throwing
+a CancellationException."
+         (let [work (async (loop [i 0]
+                             (when-not (cancelled?)
+                               (recur (inc i)))))]
+           (Thread/sleep 5)
+           (cancel work :had-to-cancel)
+           (handle work q!))
+         (is (= :had-to-cancel (unreduced (dq!))))))
+
+
+(deftest blocking-tests)
+
+
+(deftest compute-tests)
+
+
+(deftest await-tests
+  (testa "Await is used to wait on the result of an async operation."
+         (async
+           (-> (async (+ 1 2))
+               (await)
+               (q!)))
+         (is (= 3 (dq!))))
+
+  (testa "You can only use await inside an async block, or it'll error."
+         (is (thrown? AssertionError (await (async (+ 1 2))))))
+
+  (testa "You can await into a let to wait for the result of some async operation."
+         (async
+           (let [res (await (async (+ 1 2)))]
+             (q! res)))
+         (is (= 3 (dq!))))
+
+  (testa "You cannot await into a def, this is a current limitation, core.async suffers
+from the same, you can't <! into a def."
+         (async
+           (def res (await (async (+ 3 5))))
+           (catch AssertionError e
+             (q! e)))
+         (is (= AssertionError (type (dq!)))))
+
+  (testa "Work around this by using an intermediate let."
+         (async
+           (let [v (await (async (+ 1 2)))]
+             (def res v)
+             (q! :wait-for-test)))
+         (dq!)
+         (is (= res 3)))
+
+  (testa "Await waits for async results sequentially."
+         (async
+           (let [fetch-data (fn [id] (async (str "data-" id)))
+                 data1 (await (fetch-data 1))
+                 data2 (await (fetch-data 2))]
+             (q! data1)
+             (q! data2)))
+         (is (= "data-1" (dq!)))
+         (is (= "data-2" (dq!))))
+
+  (testa "You cannot await inside a letfn, this is a current limitation, which is an
+issue with the underlying core.async lib.
+See: https://ask.clojure.org/index.php/350/go-ignores-async-code-in-letfn-body"
+         (async
+           (letfn [(fetch-data [id] (async (str "data-" id)))]
+             (await (fetch-data 1)))
+           (catch AssertionError e
+             (q! e)))
+         (is (= AssertionError (type (dq!)))))
+
+  (testa "Work around this by using let instead."
+         (async
+           (let [fetch-data (fn [id] (async (str "data-" id)))]
+             (q! (await (fetch-data 1)))))
+         (is (= "data-1" (dq!))))
+
+  (testa "Await re-throws exceptions that have thrown inside the async, and can be
+caught using normal try/catch."
+         (async
+           (let [fetch-data (fn [] (async (throw (ex-info "Error fetching data" {}))))]
+             (try (await (fetch-data))
+                  (catch Exception e
+                    (q! e)))))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "Await takes a chan or a value as first argument, if given a value, it
+simply returns it immediately."
+         (async
+           (q! (await :not-a-chan)))
+         (is (= :not-a-chan (dq!))))
+
+  (testa "This goes for forms that return values as well."
+         (async
+           (q! (await (+ 1 2))))
+         (is (= 3 (dq!))))
+
+  (testa "Await supports implicit-try syntax as well, meaning it can be used as a
+try/catch/finally, so you don't have to wrap it in a try to handle thrown
+exceptions from the async block."
+         (async
+           (let [fetch-data (fn [] (async (throw (ex-info "Error fetching data" {}))))]
+             (await (fetch-data)
+               (catch Exception e
+                 (q! e))
+               (finally (q! :finally-called)))))
+         (is (= "Error fetching data" (ex-message (dq!))))
+         (is (= :finally-called (dq!))))
+
+  (testa "You cannot await accross function boundary. Same as core.async."
+         (-> (async ((fn [] (await (async (+ 1 1))))))
+             (handle q!))
+         (is (= AssertionError (type (dq!)))))
+
+  (testa "In that case, you need the inner functions to also be async."
+         (-> (async ((fn [] (async (await (async (+ 1 1)))))))
+             (handle q!))
+         (is (= 2 (dq!))))
+
+  (testa "This means the following also does not work, same as core.async, because
+for internally creates inner functions."
+         (-> (async (doall
+                     (for [x [(async 1) (async 2) (async 3)]]
+                       (inc (await x)))))
+             (handle q!))
+         (is (= AssertionError (type (dq!)))))
+
+  (testa "But since we're working in an async-style, we can wrap the inner logic in
+async blocks again."
+         (-> (doall
+              (for [x [(async 1) (async 2) (async 3)]]
+                (async (inc (await x)))))
+             (all-settled)
+             (handle q!))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "Or, like in core.async, try to use an alternate construct that doesn't wrap
+things in inner functions."
+         (-> (async (loop [[x & xs] [(async 1) (async 2) (async 3)] res []]
+                      (if x
+                        (recur xs (conj res (inc (await x))))
+                        res)))
+             (handle q!))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "Or, await all async operations in the sequence first, and then increment."
+         (-> (async (doall
+                     (for [x (await (all-settled [(async 1) (async 2) (async 3)]))]
+                       (inc x))))
+             (handle q!))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "Or, leverage more of the other async-style functions."
+         (-> [(async 1) (async 2) (async 3)]
+             (all-settled)
+             (handle #(for [x %] (inc x)))
+             (handle q!))
+         (is (= [2 3 4] (dq!)))))
+
+
+(deftest catch-tests)
+
+
+(deftest finally-tests)
+
+
+(deftest then-tests)
+
+
+(deftest chain-tests)
+
+
+(deftest handle-tests)
+
+
+(deftest sleep-tests)
+
+
+(deftest defer-tests)
+
+
+(deftest timeout-tests)
+
+
+(deftest race-tests
+  (testa "Race returns the first chan to fulfill."
+         (-> (race [(defer 100 1) (defer 100 2) (async 3)])
+             (handle q!))
+         (is (= 3 (dq!))))
+
+  (testa "If the first chan to fulfill does so with an error?, it still
    wins the race and the error gets returned in the promise-chan."
-  (-> (race [(async (throw (ex-info "error" {})))
-             (defer 100 :ok)])
-      (handle !))
-  (error? %) := true
+         (-> (race [(async (throw (ex-info "error" {})))
+                    (defer 100 :ok)])
+             (handle q!))
+         (is (error? (dq!))))
 
-  "Passing an empty seq will return a closed promise-chan, which in
+  (testa "Passing an empty seq will return a closed promise-chan, which in
    turn returns nil when taken from."
-  (-> (race [])
-      (handle !))
-  % := nil
+         (-> (race [])
+             (handle q!))
+         (is (nil? (dq!))))
 
-  "Passing nil will return a closed promise-chan, which in
+  (testa "Passing nil will return a closed promise-chan, which in
    turn returns nil when taken from."
-  (-> (race nil)
-      (handle !))
-  % := nil
+         (-> (race nil)
+             (handle q!))
+         (is (nil? (dq!))))
 
-  "chans can also contain values which will be treated as an already
+  (testa "chans can also contain values which will be treated as an already
    settled chan which returns itself."
-  (-> (race [1 (defer 100 2)])
-      (handle !))
-  % := 1
+         (-> (race [1 (defer 100 2)])
+             (handle q!))
+         (is (= 1 (dq!))))
 
-  "When passing values, they are still racing asynchronously against
+  (testa "When passing values, they are still racing asynchronously against
    each other, and the result order is non-deterministic and should
    not be depended on."
-  (every?
-   #{1}
-   (doall
-    (for [i (range 3000)]
-      (-> (race [1 2 3 4 5 6 7 8 9 (async 10)])
-          (<<??))))) := false
+         (is (not
+              (every?
+               #{1}
+               (doall
+                (for [i (range 3000)]
+                  (-> (race [1 2 3 4 5 6 7 8 9 (async 10)])
+                      (<<??))))))))
 
-  "Race cancels all other chans once one of them fulfills."
-  (-> (race [(blocking
-              (Thread/sleep 100)
-              (when (cancelled?)
-                (! :cancelled)))
-             (blocking
-              (Thread/sleep 100)
-              (when (cancelled?)
-                (! :cancelled)))
-             (blocking
-              (Thread/sleep 100)
-              (when (cancelled?)
-                (! :cancelled)))
-             (async :done)])
-      (handle !))
-  % := :done
-  % := :cancelled
-  % := :cancelled
-  % := :cancelled
+  (testa "Race cancels all other chans once one of them fulfills."
+         (-> (race [(blocking
+                      (Thread/sleep 100)
+                      (when (cancelled?)
+                        (q! :cancelled)))
+                    (blocking
+                      (Thread/sleep 100)
+                      (when (cancelled?)
+                        (q! :cancelled)))
+                    (blocking
+                      (Thread/sleep 100)
+                      (when (cancelled?)
+                        (q! :cancelled)))
+                    (async :done)])
+             (handle q!))
+         (is (= :done (dq!)))
+         (is (= :cancelled (dq!)))
+         (is (= :cancelled (dq!)))
+         (is (= :cancelled (dq!))))
 
-  "Even if the first one to fulfill did so with an error, others are
+  (testa "Even if the first one to fulfill did so with an error, others are
    still cancelled."
-  (-> (race [(blocking
-              (Thread/sleep 100)
-              (when (cancelled?)
-                (! :cancelled)))
-             (blocking
-              (Thread/sleep 100)
-              (when (cancelled?)
-                (! :cancelled)))
-             (blocking
-              (Thread/sleep 100)
-              (when (cancelled?)
-                (! :cancelled)))
-             (async (throw (ex-info "error" {})))])
-      (handle !))
-  (error? %) := true
-  % := :cancelled
-  % := :cancelled
-  % := :cancelled)
-
-;;;; race ;;;;
-;;;;;;;;;;;;;;
+         (-> (race [(blocking
+                      (Thread/sleep 100)
+                      (when (cancelled?)
+                        (q! :cancelled)))
+                    (blocking
+                      (Thread/sleep 100)
+                      (when (cancelled?)
+                        (q! :cancelled)))
+                    (blocking
+                      (Thread/sleep 100)
+                      (when (cancelled?)
+                        (q! :cancelled)))
+                    (async (throw (ex-info "error" {})))])
+             (handle q!))
+         (is (error? (dq!)))
+         (is (= :cancelled (dq!)))
+         (is (= :cancelled (dq!)))
+         (is (= :cancelled (dq!)))))
 
 
-;;;;;;;;;;;;;
-;;;; any ;;;;
+(deftest any-tests
+  (testa "Any returns the first chan to fulfill with an ok?."
+         (-> (any [(async (throw (ex-info "error" {}))) (defer 100 2) (defer 50 3)])
+             (handle q!))
+         (is (= 3 (dq!))))
 
-(rcf/tests
-  "Any returns the first chan to fulfill with an ok?."
-  (-> (any [(async (throw (ex-info "error" {}))) (defer 100 2) (defer 50 3)])
-      (handle !))
-  % := 3
-
-  "As we saw, chans that fulfill in error? are ignored, so when all chans
+  (testa "As we saw, chans that fulfill in error? are ignored, so when all chans
    fulfill in error?, any returns a promise-chan settled with an error of
    its own. This error will contain the list of all errors taken from all
    chans and its ex-data will have a key :type with value :all-errored."
-  (-> (any [(async (throw (ex-info "error" {})))
-            (async (throw (ex-info "error" {})))
-            (async (throw (ex-info "error" {})))])
-      (handle !))
-  (let [ret %]
-    (error? ret) := true
-    (:type (ex-data ret)) := :all-errored)
+         (-> (any [(async (throw (ex-info "error" {})))
+                   (async (throw (ex-info "error" {})))
+                   (async (throw (ex-info "error" {})))])
+             (handle q!))
+         (let [ret (dq!)]
+           (is (error? ret))
+           (is (= :all-errored (:type (ex-data ret))))))
 
-  "Passing an empty seq will return a closed promise-chan, which in
+  (testa "Passing an empty seq will return a closed promise-chan, which in
    turn returns nil when taken from."
-  (-> (any [])
-      (handle !))
-  % := nil
+         (-> (any [])
+             (handle q!))
+         (is (nil? (dq!))))
 
-  "Passing nil will return a closed promise-chan, which in
+  (testa "Passing nil will return a closed promise-chan, which in
    turn returns nil when taken from."
-  (-> (any nil)
-      (handle !))
-  % := nil
+         (-> (any nil)
+             (handle q!))
+         (is (nil? (dq!))))
 
-  "chans can also contain values which will be treated as an already
+  (testa "chans can also contain values which will be treated as an already
    settled chan which returns itself."
-  (-> (any [1 (defer 100 2)])
-      (handle !))
-  % := 1
+         (-> (any [1 (defer 100 2)])
+             (handle q!))
+         (is (= 1 (dq!))))
 
-  "When passing values, they are still racing asynchronously against
+  (testa "When passing values, they are still racing asynchronously against
    each other, and the result order is non-deterministic and should
    not be depended on."
-  (every?
-   #{1}
-   (doall
-    (for [i (range 3000)]
-      (-> (any [1 2 3 4 5 6 7 8 9 (async 10)])
-          (<<??))))) := false
+         (is (not
+              (every?
+               #{1}
+               (doall
+                (for [i (range 3000)]
+                  (-> (any [1 2 3 4 5 6 7 8 9 (async 10)])
+                      (<<??))))))))
 
-  "Any cancels all other chans once one of them fulfills in ok?."
-  (-> (any [(blocking
-             (Thread/sleep 100)
-             (when (cancelled?)
-               (! :cancelled)))
-            (blocking
-             (Thread/sleep 100)
-             (when (cancelled?)
-               (! :cancelled)))
-            (blocking
-             (Thread/sleep 100)
-             (when (cancelled?)
-               (! :cancelled)))
-            (defer 30 :done)
-            (async (! :throwed) (throw (ex-info "" {})))])
-      (handle !))
-  % := :throwed
-  % := :done
-  % := :cancelled
-  % := :cancelled
-  % := :cancelled
+  (testa "Any cancels all other chans once one of them fulfills in ok?."
+         (-> (any [(blocking
+                     (Thread/sleep 100)
+                     (when (cancelled?)
+                       (q! :cancelled)))
+                   (blocking
+                     (Thread/sleep 100)
+                     (when (cancelled?)
+                       (q! :cancelled)))
+                   (blocking
+                     (Thread/sleep 100)
+                     (when (cancelled?)
+                       (q! :cancelled)))
+                   (defer 30 :done)
+                   (async (q! :throwed) (throw (ex-info "" {})))])
+             (handle q!))
+         (is (= :throwed (dq!)))
+         (is (= :done (dq!)))
+         (is (= :cancelled (dq!)))
+         (is (= :cancelled (dq!)))
+         (is (= :cancelled (dq!))))
 
-  "If the first one to fulfill did so with an error, others are
+  (testa "If the first one to fulfill did so with an error, others are
    not cancelled."
-  (-> (any [(blocking
-             (Thread/sleep 30)
-             (if (cancelled?)
-               (! :cancelled)
-               (! :not-cancelled)))
-            (blocking
-             (Thread/sleep 30)
-             (if (cancelled?)
-               (! :cancelled)
-               (! :not-cancelled)))
-            (async (throw (ex-info "error" {})))])
-      (handle !))
-  % := :not-cancelled
-  % := :not-cancelled
-  % := :not-cancelled)
+         (-> (any [(blocking
+                     (Thread/sleep 30)
+                     (if (cancelled?)
+                       (q! :cancelled)
+                       (q! :not-cancelled)))
+                   (blocking
+                     (Thread/sleep 30)
+                     (if (cancelled?)
+                       (q! :cancelled)
+                       (q! :not-cancelled)))
+                   (async (throw (ex-info "error" {})))])
+             (handle q!))
+         (is (= :not-cancelled (dq!)))
+         (is (= :not-cancelled (dq!)))
+         (is (= :not-cancelled (dq!)))))
 
-;;;; any ;;;;
-;;;;;;;;;;;;;
+
+(deftest all-settled-tests
+  (testa "all-settled returns a promise-chan settled with a vector of the taken values
+   from all chans once they all fulfill"
+         (-> (all-settled [(async 1) (async 1) (async 1)])
+             (handle q!))
+         (is (= [1 1 1] (dq!))))
+
+  (testa "This is true even if any of the chan fulfills with an error."
+         (let [error (ex-info "error" {})]
+           (-> (all-settled [(async 1) (async (throw error)) (async 1)])
+               (handle q!))
+           (is (= [1 error 1] (dq!)))))
+
+  (testa "Or even if all of them fulfill with an error."
+         (let [error (ex-info "error" {})]
+           (-> (all-settled [(async (throw error)) (async (throw error)) (async (throw error))])
+               (handle q!))
+           (is (= [error error error] (dq!)))))
+
+  (testa "Passing an empty seq will return a promise-chan settled with an
+   empty vector."
+         (-> (all-settled [])
+             (handle q!))
+         (is (= [] (dq!))))
+
+  (testa "Same with passing nil, it will return a promise-chan settled with an
+   empty vector."
+         (-> (all-settled nil)
+             (handle q!))
+         (is (= [] (dq!))))
+
+  (testa "The returned promise-chan will always contain a vector? even if chans isn't
+   one."
+         (-> (all-settled (list (async 1) (async 1) (async 1)))
+             (handle q!))
+         (is (vector? (dq!))))
+
+  (testa "chans can contain values as well as channels, in which case they
+   will be treated as an already settled chan which returns itself."
+         (-> (all-settled [1 2 (async 1)])
+             (handle q!))
+         (is (= [1 2 1] (dq!))))
+
+  (testa "The order of the taken values in the vector settled into the returned
+   promise-chan are guaranteed to correspond to the same order as the chans.
+   Thus order can be relied upon."
+         (is
+          (every?
+           #(= [1 2 3 4 5 6 7 8 9 10] %)
+           (doall
+            (for [i (range 3000)]
+              (-> (all-settled [1 (async 2) 3 (async 4) (async 5) 6 (async 7) 8 9 (async 10)])
+                  (<<??))))))))
+
+
+(deftest all-tests
+  (testa "Awaits all promise-chan in given seq and returns a vector of
+their results in order. Promise-chan obviously run concurrently,
+so the entire operation will take as long as the longest one."
+         (async
+           (q! (await (all [1 (defer 100 2) (defer 200 3)]))))
+         (is (= [1 2 3] (dq! 210))))
+
+  (testa "Short-circuits as soon as one promise-chan errors, returning
+the error."
+         (async
+           (try
+             (await (all [(defer 10 #(/ 1 0)) (defer 100 2) (defer 200 3)]))
+             (catch Exception e
+               (q! e))))
+         (is (= ArithmeticException (type (dq! 50)))))
+
+  (testa
+    "Can contain non-promise-chan as well."
+    (async
+      (q! (await (all [1 2 3]))))
+    (is (= [1 2 3] (dq!))))
+
+  (testa "But since all is not a macro, if one of them throw it throws
+immediately as the argument to all get evaluated."
+         (try (all [1 (defer 10 2) (/ 1 0)])
+              (catch Exception e
+                (q! e)))
+         (is (= ArithmeticException (type (dq!)))))
+
+  (testa "This is especially important when using some of the helper
+functions instead of plain async/await, because it will
+throw instead of all returning the error."
+         (try
+           (-> (all [1 (defer 10 2) (/ 1 0)])
+               (a/catch (q! :this-wont-work)))
+           (catch Exception _
+             (q! :this-will)))
+         (is (= :this-will (dq!))))
+
+  (testa "If given an empty seq, returns a promise-chan settled
+to nil."
+         (async
+           (q! (await (all []))))
+         (is (nil? (dq!))))
+
+  (testa "If given nil, returns a promise-chan settled to nil."
+         (async
+           (q! (await (all []))))
+         (is (nil? (dq!)))))
+
+
+(deftest do!-tests)
+
+
+(deftest alet-tests
+  (testa "Like Clojure's let, except each binding is awaited."
+         (alet
+             [a (defer 100 1)
+              b (defer 100 2)
+              c (defer 100 3)]
+           (q! (+ a b c)))
+         (is (= 6 (dq!))))
+
+  (testa "Like Clojure's let, this is not parallel, the first binding is
+awaited, then the second, then the third, etc."
+         (alet
+             [a (defer 100 1)
+              b (defer 100 2)
+              c (defer 100 3)]
+           (q! (+ a b c)))
+         (is (= :timeout (dq! 200))))
+
+  (testa
+    "Let bindings can depend on previous ones."
+    (alet
+        [a 1
+         b (defer 100 (+ a a))
+         c (inc b)]
+      (q! c))
+    (is (= 3 (dq!)))))
+
+
+(deftest clet-tests)
+
+
+(deftest time-tests)
