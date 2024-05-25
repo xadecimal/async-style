@@ -1,11 +1,19 @@
 (ns com.xadecimal.async-style-test
   (:refer-clojure :exclude [await time])
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is use-fixtures]]
             [com.xadecimal.async-style :as a :refer :all]
             [com.xadecimal.async-style-test-utils :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException]
            [clojure.core.async.impl.channels ManyToManyChannel]))
+
+
+(defn around-tests
+  [tests]
+  (tests)
+  (shutdown-agents))
+
+(use-fixtures :once around-tests)
 
 
 (deftest error?-tests
@@ -188,10 +196,92 @@ value."
          (is (= 1 (<<!! (async (async (async 1))))))))
 
 
-(deftest <<?-tests)
+(deftest <<?-tests
+  (testa "Takes a value from a chan."
+         (async
+           (q! (<<? (async "Hello!"))))
+         (is (= "Hello!" (dq!))))
+
+  (testa "Parks if none are available yet, resumes only once a value is available."
+         (async
+           (let [pc (async (Thread/sleep 100)
+                           "This will only have a value after 100ms")]
+             (q! (System/currentTimeMillis))
+             (q! (<<? pc))
+             (q! (System/currentTimeMillis))))
+         (let [before-time (dq!)
+               ret (dq!)
+               after-time (dq!)]
+           (is (>= (- after-time before-time) 100))
+           (is (= "This will only have a value after 100ms" ret))))
+
+  (testa "Throws if used outside an async block"
+         (is (thrown? AssertionError (<<? (async)))))
+
+  (testa "Works on values as well, will just return it immediately."
+         (async (q! (<<? :a-value))
+                (q! (<<? 1))
+                (q! (<<? ["a" "b"]))
+                (q! (System/currentTimeMillis))
+                (q! (<<? :a-value))
+                (q! (System/currentTimeMillis)))
+         (is (= :a-value (dq!)))
+         (is (= 1 (dq!)))
+         (is (= ["a" "b"] (dq!)))
+         (let [before-time (dq!)
+               _ (dq!)
+               after-time (dq!)]
+           (is (<= (- after-time before-time) 1))))
+
+  (testa "If an exception is returned by chan, it will re-throw the exception."
+         (async (try
+                  (<<? (async (/ 1 0)))
+                  (catch ArithmeticException _
+                    (q! :thrown))))
+         (is (= :thrown (dq!))))
+
+  (testa "Taken value will be fully joined. That means if the value taken is
+itself a chan, <<? will also take from it, until it eventually takes a non chan
+value."
+         (async
+           (q! (<<? (async (async (async 1))))))
+         (is (= 1 (dq!)))))
 
 
-(deftest <<??-tests)
+(deftest <<??-tests
+  (testa "Takes a value from a chan."
+         (is (= "Hello!" (<<?? (async "Hello!")))))
+
+  (testa "Blocks if none are available yet, resumes only once a value is available."
+         (let [pc (async (Thread/sleep 100)
+                         "This will only have a value after 100ms")
+               before-time (System/currentTimeMillis)
+               ret (<<?? pc)
+               after-time (System/currentTimeMillis)]
+           (is (>= (- after-time before-time) 100))
+           (is (= "This will only have a value after 100ms" ret))))
+
+  (testa "Should not be used inside an async block, since it will block instead
+of parking."
+         (async (q! (<<?? (async "Don't do this even though it works."))))
+         (is (= "Don't do this even though it works." (dq!))))
+
+  (testa "Works on values as well, will just return it immediately."
+         (is (= :a-value (<<?? :a-value)))
+         (is (= 1 (<<?? 1)))
+         (is (= ["a" "b"] (<<?? ["a" "b"])))
+         (let [before-time (System/currentTimeMillis)
+               _ (<<?? :a-value)
+               after-time (System/currentTimeMillis)]
+           (is (<= (- after-time before-time) 1))))
+
+  (testa "If an exception is returned by chan, it will re-throw the exception."
+         (is (thrown? ArithmeticException (<<?? (async (/ 1 0))))))
+
+  (testa "Taken value will be fully joined. That means if the value taken is
+itself a chan, <<?? will also take from it, until it eventually takes a non chan
+value."
+         (is (= 1 (<<?? (async (async (async 1))))))))
 
 
 (deftest ex-details-tests)
@@ -239,6 +329,18 @@ value."
            (is (< (- t2 t1) 100))
            (handle chan q!)
            (is (= :done (dq! 2000)))))
+
+  (testa "Async should be used to shuffle data around, or for very small computations.
+Because all blocks will run in a fixed size thread pool, which by default has only 8
+threads. This means you can't have more than 8 concurrent active blocks, others will
+get queued up and have to wait for one of those 8 to finish. That means avoid doing
+blocking operations or long running computations, for which you should use blocking
+or compute instead."
+         (-> (for [i (range 10)]
+               (async (Thread/sleep 1000) i))
+             (all)
+             (handle q!))
+         (is (= :timeout (dq! 1100))))
 
   (testa "Async supports implicit-try, meaning you can catch/finally on it as you would
 with try/catch/finally. It's similar to if you always wrapped the inside in a try."
@@ -294,10 +396,216 @@ a CancellationException."
          (is (= :had-to-cancel (unreduced (dq!))))))
 
 
-(deftest blocking-tests)
+(deftest blocking-tests
+  (testa "Blocking is used to run some blocking code asynchronously on the blocking-pool."
+         (-> (blocking (+ 1 2))
+             (handle q!))
+         (is (= 3 (dq!))))
+
+  (testa "It wraps any form, so even a single value works."
+         (-> (blocking 1)
+             (handle q!))
+         (is (= 1 (dq!))))
+
+  (testa "You can use it to create blocking functions, by wrapping the fn body with it."
+         (-> ((fn fetch-data [] (blocking :data)))
+             (handle q!))
+         (is (= :data (dq!))))
+
+  (testa "The function can return anything."
+         (-> ((fn fetch-data [] (blocking (map inc [1 2 3]))))
+             (handle q!))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "You can freely throw inside blocking, the exception will be returned as a value."
+         (-> (blocking (throw (ex-info "Error fetching data" {})))
+             (handle q!))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "This works for blocking functions as well."
+         (-> ((fn fetch-data [] (blocking (throw (ex-info "Error fetching data" {})))))
+             (handle q!))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "Blocking returns a promise-chan immediately, and does not block."
+         (let [t1 (System/currentTimeMillis)
+               chan (blocking (Thread/sleep 1000) :done)
+               t2 (System/currentTimeMillis)]
+           (is (= ManyToManyChannel (type chan)))
+           (is (< (- t2 t1) 100))
+           (handle chan q!)
+           (is (= :done (dq! 2000)))))
+
+  (testa "Blocking should be used when what you do inside the block is going to
+block the running thread. Because unlike async and compute, which both run on
+shared thread pool with a limited number of threads, blocking creates as many
+threads as are needed so all your blocking blocks run concurrently."
+         (-> (for [i (range 200)]
+               (blocking (Thread/sleep 1000) i))
+             (all)
+             (handle q!))
+         (is (= (range 200) (dq! 1100))))
+
+  (testa "Blocking supports implicit-try, meaning you can catch/finally on it as you would
+with try/catch/finally. It's similar to if you always wrapped the inside in a try."
+         (-> (blocking (/ 1 0)
+                       (catch ArithmeticException e
+                         0))
+             (handle q!))
+         (is (= 0 (dq!))))
+
+  (testa "Blocking example of implicit-try with a finally."
+         (-> (blocking (+ 1 1)
+                       (finally (q! :finally-called)))
+             (handle q!))
+         (is (= :finally-called (dq!)))
+         (is (= 2 (dq!))))
+
+  (testa "Or with catch and finally together."
+         (-> (blocking (/ 1 0)
+                       (catch ArithmeticException e
+                         (q! :catch-called)
+                         0)
+                       (finally (q! :finally-called)))
+             (handle q!))
+         (is (= :catch-called (dq!)))
+         (is (= :finally-called (dq!)))
+         (is (= 0 (dq!))))
+
+  (testa "Blocking block can be cancelled, they will skip their execution if cancelled
+before they begin executing."
+         (cancel (blocking (q! :will-timeout-due-to-cancel)))
+         (is (= :timeout (dq!))))
+
+  (testa "If you plan on doing lots of work, and want to support it being cancellable,
+you can explictly check for cancellation to interupt your work. By default a
+cancelled blocking block returns a CancellationException."
+         (let [work (blocking (loop [i 0]
+                                (when-not (cancelled?)
+                                  (recur (inc i)))))]
+           (Thread/sleep 5)
+           (cancel work)
+           (handle work q!))
+         (is (= CancellationException (type (dq! 50)))))
+
+  (testa "You can explicitly set a value when cancelling, and the cancelled blocking
+chan will return a (reduced value) of the value instead of throwing
+a CancellationException."
+         (let [work (blocking (loop [i 0]
+                                (when-not (cancelled?)
+                                  (recur (inc i)))))]
+           (Thread/sleep 5)
+           (cancel work :had-to-cancel)
+           (handle work q!))
+         (is (= :had-to-cancel (unreduced (dq!))))))
 
 
-(deftest compute-tests)
+(deftest compute-tests
+  (testa "Compute is used to run some code asynchronously on the compute-pool."
+         (-> (compute (+ 1 2))
+             (handle q!))
+         (is (= 3 (dq!))))
+
+  (testa "It wraps any form, so even a single value works."
+         (-> (compute 1)
+             (handle q!))
+         (is (= 1 (dq!))))
+
+  (testa "You can use it to create compute functions, by wrapping the fn body with it."
+         (-> ((fn fetch-data [] (compute :data)))
+             (handle q!))
+         (is (= :data (dq!))))
+
+  (testa "The function can return anything."
+         (-> ((fn fetch-data [] (compute (map inc [1 2 3]))))
+             (handle q!))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "You can freely throw inside compute, the exception will be returned as a value."
+         (-> (compute (throw (ex-info "Error fetching data" {})))
+             (handle q!))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "This works for compute functions as well."
+         (-> ((fn fetch-data [] (compute (throw (ex-info "Error fetching data" {})))))
+             (handle q!))
+         (is (= "Error fetching data" (ex-message (dq!)))))
+
+  (testa "Compute returns a promise-chan immediately, and does not block."
+         (let [t1 (System/currentTimeMillis)
+               chan (compute (Thread/sleep 1000) :done)
+               t2 (System/currentTimeMillis)]
+           (is (= ManyToManyChannel (type chan)))
+           (is (< (- t2 t1) 100))
+           (handle chan q!)
+           (is (= :done (dq! 2000)))))
+
+  (testa "Compute should be used for long computations. Because all blocks will
+run in a fixed size thread pool, which by default is the number of cores on your
+computer + 2. This means you can't have more concurrent active blocks, others will
+get queued up and have to wait for one of those to finish. When doing long computations,
+"
+         (-> (for [i (->> (-> (Runtime/getRuntime) .availableProcessors)
+                          (+ 2)
+                          inc
+                          range)]
+               (compute (Thread/sleep 1000) i))
+             (all)
+             (handle q!))
+         (is (= :timeout (dq! 1100))))
+
+  (testa "Compute supports implicit-try, meaning you can catch/finally on it as you would
+with try/catch/finally. It's similar to if you always wrapped the inside in a try."
+         (-> (compute (/ 1 0)
+                      (catch ArithmeticException e
+                        0))
+             (handle q!))
+         (is (= 0 (dq!))))
+
+  (testa "Compute example of implicit-try with a finally."
+         (-> (compute (+ 1 1)
+                      (finally (q! :finally-called)))
+             (handle q!))
+         (is (= :finally-called (dq!)))
+         (is (= 2 (dq!))))
+
+  (testa "Or with catch and finally together."
+         (-> (compute (/ 1 0)
+                      (catch ArithmeticException e
+                        (q! :catch-called)
+                        0)
+                      (finally (q! :finally-called)))
+             (handle q!))
+         (is (= :catch-called (dq!)))
+         (is (= :finally-called (dq!)))
+         (is (= 0 (dq!))))
+
+  (testa "Compute block can be cancelled, they will skip their execution if cancelled
+before they begin executing."
+         (cancel (compute (q! :will-timeout-due-to-cancel)))
+         (is (= :timeout (dq!))))
+
+  (testa "If you plan on doing lots of work, and want to support it being cancellable,
+you can explictly check for cancellation to interupt your work. By default a
+cancelled compute block returns a CancellationException."
+         (let [work (compute (loop [i 0]
+                               (when-not (cancelled?)
+                                 (recur (inc i)))))]
+           (Thread/sleep 5)
+           (cancel work)
+           (handle work q!))
+         (is (= CancellationException (type (dq! 50)))))
+
+  (testa "You can explicitly set a value when cancelling, and the cancelled compute
+chan will return a (reduced value) of the value instead of throwing
+a CancellationException."
+         (let [work (compute (loop [i 0]
+                               (when-not (cancelled?)
+                                 (recur (inc i)))))]
+           (Thread/sleep 5)
+           (cancel work :had-to-cancel)
+           (handle work q!))
+         (is (= :had-to-cancel (unreduced (dq!))))))
 
 
 (deftest await-tests
@@ -620,14 +928,15 @@ things in inner functions."
          (is (= :cancelled (dq!))))
 
   (testa "If the first one to fulfill did so with an error, others are
-   not cancelled."
+   not cancelled. But as soon as any of the other fulfill, the remaining
+   ones will cancel."
          (-> (any [(blocking
                      (Thread/sleep 30)
                      (if (cancelled?)
                        (q! :cancelled)
                        (q! :not-cancelled)))
                    (blocking
-                     (Thread/sleep 30)
+                     (Thread/sleep 60)
                      (if (cancelled?)
                        (q! :cancelled)
                        (q! :not-cancelled)))
@@ -635,7 +944,7 @@ things in inner functions."
              (handle q!))
          (is (= :not-cancelled (dq!)))
          (is (= :not-cancelled (dq!)))
-         (is (= :not-cancelled (dq!)))))
+         (is (= :cancelled (dq!)))))
 
 
 (deftest all-settled-tests
@@ -699,7 +1008,7 @@ their results in order. Promise-chan obviously run concurrently,
 so the entire operation will take as long as the longest one."
          (async
            (q! (await (all [1 (defer 100 2) (defer 200 3)]))))
-         (is (= [1 2 3] (dq! 210))))
+         (is (= [1 2 3] (dq! 250))))
 
   (testa "Short-circuits as soon as one promise-chan errors, returning
 the error."

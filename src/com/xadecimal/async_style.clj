@@ -173,12 +173,14 @@
                       (a/close! c))))))
     c))
 
-(defmacro ^:private compute'
-  "Executes the body in the compute-pool, returning immediately to the calling
+(defmacro compute'
+  "DO NOT USE -- use compute instead
+   Executes the body in the compute-pool, returning immediately to the calling
    thread. Returns a channel which will receive the result of the body when
    completed, then close."
   [& body]
-  `(compute-call (^:once fn* [] ~@body)))
+  (let [compute-call- compute-call]
+    `(~compute-call- (^:once fn* [] ~@body))))
 
 (defn- go-async'
   "Wraps body in a way that it executes in an async or blocking block with
