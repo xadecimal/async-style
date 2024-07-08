@@ -1,4 +1,32 @@
-{:min-bb-version "0.4.0"
- :tasks
- {test {:doc "Run clojure.test tests."
-        :task (shell "clojure -X:test")}}}
+{:tasks
+ {test (clojure "-X:test")
+  gen (clojure "-X:build gen")
+  lint (clojure "-T:build lint")
+  deploy (clojure "-T:build deploy")
+  install (clojure "-T:build install")
+  update-documents (clojure "-T:build update-documents")
+  bump-major-version (clojure "-T:build bump-major-version")
+  bump-minor-version (clojure "-T:build bump-minor-version")
+  bump-patch-version (clojure "-T:build bump-patch-version")
+  release (do (run 'lint)
+              (run 'test)
+              (run 'install))
+  publish {:requires ([clojure.edn :as edn])
+           :task (let [version (-> (edn/read-string (slurp "build.edn")) :version)]
+                   (run 'release)
+                   (run 'update-documents)
+                   (shell "git add .")
+                   (try (shell "git diff --quiet --cached")
+                        (catch Exception _
+                          (shell
+                           (str "git commit -m \"Prepared for new release \"" version))))
+                   (shell "git push")
+                   (shell (str "git tag -a " version " -m \"Release v\"" version))
+                   (shell (str "git push origin " version))
+                   (run 'deploy))}
+  publish-patch (do (run 'bump-patch-version)
+                    (run 'publish))
+  publish-minor (do (run 'bump-minor-version)
+                    (run 'publish))
+  publish-major (do (run 'bump-major-version)
+                    (run 'publish))}}
