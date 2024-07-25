@@ -10,27 +10,64 @@
 ;;;; DO NOT MODIFY ;;;
 
 (ns com.xadecimal.async-style
-  "Definitions:\n    async: asynchronously running on the async-pool, await and others will park, use it for polling and small compute tasks\n    blocking: asynchronously running on the blocking-pool, use it for running blocking operations and blocking io\n    compute: asynchronously running on the compute-pool, use it for running heavy computation, don't block it\n    settle(d): when a channel is delivered a value and closed, or in the case of a promise-chan, it means the promise-chan was fulfilled and will forever return the same value every time it is taken for and additional puts are ignored.\n    fulfill(ed): when a channel is delivered a value, but not necessarily closed\n    join(ed): when a channel returns a channel, joining is the process of further taking from the returned channel until a value is returned, thus unrolling a channel of channel of channel of ...\n    async-pool: the core.async go block executor, it is fixed size, defaulting to 8 threads, don't soft or hard block it\n    blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io\n    compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
+  "Definitions:
+    async: asynchronously running on the async-pool, await and others will park, use it for polling and small compute tasks
+    blocking: asynchronously running on the blocking-pool, use it for running blocking operations and blocking io
+    compute: asynchronously running on the compute-pool, use it for running heavy computation, don't block it
+    settle(d): when a channel is delivered a value and closed, or in the case of a promise-chan, it means the promise-chan was fulfilled and will forever return the same value every time it is taken for and additional puts are ignored.
+    fulfill(ed): when a channel is delivered a value, but not necessarily closed
+    join(ed): when a channel returns a channel, joining is the process of further taking from the returned channel until a value is returned, thus unrolling a channel of channel of channel of ...
+    async-pool: the core.async go block executor, it is fixed size, defaulting to 8 threads, don't soft or hard block it
+    blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
+    compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
   (:refer-clojure :exclude [await time])
   (:require [com.xadecimal.async-style.impl :as impl]))
 
 (defn error?
-  "Returns true if v is considered an error as per async-style's error\n   representations, false otherwise. Valid error representations in async-style\n   for now are:\n     * instances of Throwable"
+  "Returns true if v is considered an error as per async-style's error
+   representations, false otherwise. Valid error representations in async-style
+   for now are:
+     * instances of Throwable"
   {:inline (fn ([v] ` (com.xadecimal.async-style.impl/error? ~v)))}
   ([v] (com.xadecimal.async-style.impl/error? v)))
 
 (defn ok?
-  "Returns true if v is not considered an error as per async-style's error\n   representations, false otherwise. Valid error representations in async-style\n   for now are:\n     * instances of Throwable"
+  "Returns true if v is not considered an error as per async-style's error
+   representations, false otherwise. Valid error representations in async-style
+   for now are:
+     * instances of Throwable"
   {:inline (fn ([v] ` (com.xadecimal.async-style.impl/ok? ~v)))}
   ([v] (com.xadecimal.async-style.impl/ok? v)))
 
 (defn cancelled?
-  "Returns true if execution context was cancelled and thus should be\n   interrupted/short-circuited, false otherwise.\n\n   Users are expected, when inside an execution block like async, blocking or\n   compute, to check using (cancelled?) as often as they can in case someone\n   tried to cancel their execution, in which case they should\n   interrupt/short-circuit the work as soon as they can."
+  "Returns true if execution context was cancelled and thus should be
+   interrupted/short-circuited, false otherwise.
+
+   Users are expected, when inside an execution block like async, blocking or
+   compute, to check using (cancelled?) as often as they can in case someone
+   tried to cancel their execution, in which case they should
+   interrupt/short-circuit the work as soon as they can."
   {:inline (fn ([] ` (com.xadecimal.async-style.impl/cancelled?)))}
   ([] (com.xadecimal.async-style.impl/cancelled?)))
 
 (defn cancel
-  "When called on chan, tries to tell processes currently executing over the\n   chan that they should interrupt and short-circuit (aka cancel) their execution\n   as soon as they can, as it is no longer needed.\n\n   The way cancellation is conveyed is by settling the return channel of async,\n   blocking and compute blocks (and their equivalent go-async, go-blocking and\n   go-compute) to a CancellationException, unless passed a v explicitly, in which\n   case it will settle it with (reduced v).\n\n   That means by default a block that has its execution cancelled will return a\n   CancellationException and thus awaiters and other takers of its result will\n   see the exception and can handle it accordingly. If instead you want to cancel\n   the block so it returns a reduced value, pass in a v and the awaiters and\n   takers will receive that reduced value instead.\n\n   It is up to processes inside (go-)async, (go-)blocking and (go-)compute\n   blocks to properly check for cancellation on a channel."
+  "When called on chan, tries to tell processes currently executing over the
+   chan that they should interrupt and short-circuit (aka cancel) their execution
+   as soon as they can, as it is no longer needed.
+
+   The way cancellation is conveyed is by settling the return channel of async,
+   blocking and compute blocks (and their equivalent go-async, go-blocking and
+   go-compute) to a CancellationException, unless passed a v explicitly, in which
+   case it will settle it with (reduced v).
+
+   That means by default a block that has its execution cancelled will return a
+   CancellationException and thus awaiters and other takers of its result will
+   see the exception and can handle it accordingly. If instead you want to cancel
+   the block so it returns a reduced value, pass in a v and the awaiters and
+   takers will receive that reduced value instead.
+
+   It is up to processes inside (go-)async, (go-)blocking and (go-)compute
+   blocks to properly check for cancellation on a channel."
   {:inline (fn
              ([chan] ` (com.xadecimal.async-style.impl/cancel ~chan))
              ([chan v] ` (com.xadecimal.async-style.impl/cancel ~chan ~v)))}
@@ -38,12 +75,14 @@
   ([chan v] (com.xadecimal.async-style.impl/cancel chan v)))
 
 (defmacro <<!
-  "Parking takes from chan-or-value so that any exception is returned, and with\n   taken result fully joined."
+  "Parking takes from chan-or-value so that any exception is returned, and with
+   taken result fully joined."
   {}
   ([chan-or-value] ` (com.xadecimal.async-style.impl/<<! ~chan-or-value)))
 
 (defn <<!!
-  "Blocking takes from chan-or-value so that any exception is returned, and with\n   taken result fully joined."
+  "Blocking takes from chan-or-value so that any exception is returned, and with
+   taken result fully joined."
   {:inline (fn
              ([chan-or-value]
               `
@@ -51,48 +90,109 @@
   ([chan-or-value] (com.xadecimal.async-style.impl/<<!! chan-or-value)))
 
 (defmacro <<?
-  "Parking takes from chan-or-value so that any exception taken is re-thrown,\n   and with taken result fully joined. Supports implicit-try to handle thrown\n   exceptions such as:\n\n   (async\n     (<<? (async (/ 1 0))\n          (catch ArithmeticException e\n            (println e))\n          (catch Exception e\n            (println \"Other unexpected excpetion\"))\n          (finally (println \"done\"))))"
+  "Parking takes from chan-or-value so that any exception taken is re-thrown,
+   and with taken result fully joined. Supports implicit-try to handle thrown
+   exceptions such as:
+
+   (async
+     (<<? (async (/ 1 0))
+          (catch ArithmeticException e
+            (println e))
+          (catch Exception e
+            (println \"Other unexpected excpetion\"))
+          (finally (println \"done\"))))"
   {}
   ([chan-or-value & body]
    `
    (com.xadecimal.async-style.impl/<<? ~chan-or-value ~@body)))
 
 (defmacro <<??
-  "Blocking takes from chan-or-value so that any exception taken is re-thrown,\n   and with taken result fully joined. Supports implicit-try to handle thrown\n   exceptions such as:\n\n   (async\n     (<<? (async (/ 1 0))\n          (catch ArithmeticException e\n            (println e))\n          (catch Exception e\n            (println \"Other unexpected excpetion\"))\n          (finally (println \"done\"))))"
+  "Blocking takes from chan-or-value so that any exception taken is re-thrown,
+   and with taken result fully joined. Supports implicit-try to handle thrown
+   exceptions such as:
+
+   (async
+     (<<? (async (/ 1 0))
+          (catch ArithmeticException e
+            (println e))
+          (catch Exception e
+            (println \"Other unexpected excpetion\"))
+          (finally (println \"done\"))))"
   {}
   ([chan-or-value & body]
    `
    (com.xadecimal.async-style.impl/<<?? ~chan-or-value ~@body)))
 
 (defn ex-details
-  "Returns the asynchronous exception details of an exception thrown from an\n   async, blocking, compute or await block. The details are a kind of stack of\n   exceptions thrown that helps you identify where and from what the exception\n   triggered the exception."
+  "Returns the asynchronous exception details of an exception thrown from an
+   async, blocking, compute or await block. The details are a kind of stack of
+   exceptions thrown that helps you identify where and from what the exception
+   triggered the exception."
   {:inline (fn ([ex] ` (com.xadecimal.async-style.impl/ex-details ~ex)))}
   ([ex] (com.xadecimal.async-style.impl/ex-details ex)))
 
 (defmacro async
-  "Asynchronously execute body on the async-pool with support for cancellation,\n   implicit-try, as well as asynchronous exception details capture, and returning\n   a promise-chan settled with the result or any exception thrown.\n\n   body will run on the async-pool, so if you plan on doing something blocking\n   or compute heavy, use blocking or compute instead."
+  "Asynchronously execute body on the async-pool with support for cancellation,
+   implicit-try, as well as asynchronous exception details capture, and returning
+   a promise-chan settled with the result or any exception thrown.
+
+   body will run on the async-pool, so if you plan on doing something blocking
+   or compute heavy, use blocking or compute instead."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/async ~@body)))
 
 (defmacro blocking
-  "Asynchronously execute body on the blocking-pool with support for\n   cancellation, implicit-try, as well as asynchronous exception details capture,\n   and returning a promise-chan settled with the result or any exception thrown.\n\n   body will run on the blocking-pool, so use this when you will be blocking or\n   doing blocking io only."
+  "Asynchronously execute body on the blocking-pool with support for
+   cancellation, implicit-try, as well as asynchronous exception details capture,
+   and returning a promise-chan settled with the result or any exception thrown.
+
+   body will run on the blocking-pool, so use this when you will be blocking or
+   doing blocking io only."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/blocking ~@body)))
 
 (defmacro compute
-  "Asynchronously execute body on the compute-pool with support for\n   cancellation, implicit-try, as well as asynchronous exception details capture,\n   and returning a promise-chan settled with the result or any exception thrown.\n\n   body will run on the compute-pool, so use this when you will be doing heavy\n   computation, and don't block, if you're going to block use blocking instead.\n   If you're doing a very small computation, like polling another chan, use async\n   instead."
+  "Asynchronously execute body on the compute-pool with support for
+   cancellation, implicit-try, as well as asynchronous exception details capture,
+   and returning a promise-chan settled with the result or any exception thrown.
+
+   body will run on the compute-pool, so use this when you will be doing heavy
+   computation, and don't block, if you're going to block use blocking instead.
+   If you're doing a very small computation, like polling another chan, use async
+   instead."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/compute ~@body)))
 
 (defmacro await
-  "Parking takes from chan-or-value so that any exception taken is re-thrown,\n   and with taken result fully joined. As opposed to <<?, await captures\n   additional details when it throws an exception which can be retrieved using\n   ex-details and helps to debug where and what causes an exception.\n\n   Supports implicit-try to handle thrown exceptions such as:\n\n   (async\n     (await (async (/ 1 0))\n            (catch ArithmeticException e\n              (println e))\n            (catch Exception e\n              (println \"Other unexpected excpetion\"))\n            (finally (println \"done\"))))"
+  "Parking takes from chan-or-value so that any exception taken is re-thrown,
+   and with taken result fully joined. As opposed to <<?, await captures
+   additional details when it throws an exception which can be retrieved using
+   ex-details and helps to debug where and what causes an exception.
+
+   Supports implicit-try to handle thrown exceptions such as:
+
+   (async
+     (await (async (/ 1 0))
+            (catch ArithmeticException e
+              (println e))
+            (catch Exception e
+              (println \"Other unexpected excpetion\"))
+            (finally (println \"done\"))))"
   {}
   ([chan-or-value & body]
    `
    (com.xadecimal.async-style.impl/await ~chan-or-value ~@body)))
 
 (defn catch
-  "Parking takes fully joined value from chan. If value is an error of\n   pred-or-type, will call error-handler with it.\n\n   Returns a promise-chan settled with the value or the return of the\n   error-handler.\n\n   error-handler will run on the async-pool, so if you plan on doing something\n   blocking or compute heavy, remember to wrap it in a blocking or compute\n   respectively."
+  "Parking takes fully joined value from chan. If value is an error of
+   pred-or-type, will call error-handler with it.
+
+   Returns a promise-chan settled with the value or the return of the
+   error-handler.
+
+   error-handler will run on the async-pool, so if you plan on doing something
+   blocking or compute heavy, remember to wrap it in a blocking or compute
+   respectively."
   {:inline (fn
              ([chan error-handler]
               `
@@ -107,24 +207,53 @@
    (com.xadecimal.async-style.impl/catch chan pred-or-type error-handler)))
 
 (defn finally
-  "Parking takes fully joined value from chan, and calls f with it no matter if\n   the value is ok? or error?.\n\n   Returns a promise-chan settled with the taken value, and not the return of f,\n   which means f is implied to be doing side-effect(s).\n\n   f will run on the async-pool, so if you plan on doing something blocking or\n   compute heavy, remember to wrap it in a blocking or compute respectively."
+  "Parking takes fully joined value from chan, and calls f with it no matter if
+   the value is ok? or error?.
+
+   Returns a promise-chan settled with the taken value, and not the return of f,
+   which means f is implied to be doing side-effect(s).
+
+   f will run on the async-pool, so if you plan on doing something blocking or
+   compute heavy, remember to wrap it in a blocking or compute respectively."
   {:inline (fn ([chan f] ` (com.xadecimal.async-style.impl/finally ~chan ~f)))}
   ([chan f] (com.xadecimal.async-style.impl/finally chan f)))
 
 (defn then
-  "Asynchronously executes f with the result of chan once available, unless chan\n   results in an error, in which case f is not executed.\n\n   Returns a promise-chan settled with the result of f or the error.\n\n   f will run on the async-pool, so if you plan on doing something blocking or\n   compute heavy, remember to wrap it in a blocking or compute respectively."
+  "Asynchronously executes f with the result of chan once available, unless chan
+   results in an error, in which case f is not executed.
+
+   Returns a promise-chan settled with the result of f or the error.
+
+   f will run on the async-pool, so if you plan on doing something blocking or
+   compute heavy, remember to wrap it in a blocking or compute respectively."
   {:inline (fn ([chan f] ` (com.xadecimal.async-style.impl/then ~chan ~f)))}
   ([chan f] (com.xadecimal.async-style.impl/then chan f)))
 
 (defn chain
-  "Chains multiple then together starting with chan like:\n     (-> chan (then f1) (then f2) (then fs) ...)\n\n   fs will all run on the async-pool, so if you plan on doing something blocking\n   or compute heavy, remember to wrap it in a blocking or compute respectively."
+  "Chains multiple then together starting with chan like:
+     (-> chan (then f1) (then f2) (then fs) ...)
+
+   fs will all run on the async-pool, so if you plan on doing something blocking
+   or compute heavy, remember to wrap it in a blocking or compute respectively."
   {:inline (fn
              ([chan & fs] ` (com.xadecimal.async-style.impl/chain ~chan ~@fs)))}
   ([chan & fs]
    (clojure.core/apply com.xadecimal.async-style.impl/chain chan fs)))
 
 (defn handle
-  "Asynchronously executes f with the result of chan once available (f result),\n   unlike then, handle will always execute f, when chan's result is an error f is\n   called with the error (f error).\n\n   Returns a promise-chan settled with the result of f.\n\n   Alternatively, one can pass an ok-handler and an error-handler and the\n   respective one will be called based on if chan's result is ok (ok-handler\n   result) or an error (error-handler error).\n\n   f, ok-handler and error-handler will all run on the async-pool, so if you\n   plan on doing something blocking or compute heavy, remember to wrap it in a\n   blocking or compute respectively."
+  "Asynchronously executes f with the result of chan once available (f result),
+   unlike then, handle will always execute f, when chan's result is an error f is
+   called with the error (f error).
+
+   Returns a promise-chan settled with the result of f.
+
+   Alternatively, one can pass an ok-handler and an error-handler and the
+   respective one will be called based on if chan's result is ok (ok-handler
+   result) or an error (error-handler error).
+
+   f, ok-handler and error-handler will all run on the async-pool, so if you
+   plan on doing something blocking or compute heavy, remember to wrap it in a
+   blocking or compute respectively."
   {:inline (fn
              ([chan f] ` (com.xadecimal.async-style.impl/handle ~chan ~f))
              ([chan ok-handler error-handler]
@@ -137,12 +266,18 @@
    (com.xadecimal.async-style.impl/handle chan ok-handler error-handler)))
 
 (defn sleep
-  "Asynchronously sleep ms time, returns a promise-chan which settles after ms\n   time."
+  "Asynchronously sleep ms time, returns a promise-chan which settles after ms
+   time."
   {:inline (fn ([ms] ` (com.xadecimal.async-style.impl/sleep ~ms)))}
   ([ms] (com.xadecimal.async-style.impl/sleep ms)))
 
 (defn defer
-  "Waits ms time and then asynchronously executes value-or-fn, returning a\n   promsie-chan settled with the result.\n\n   value-or-fn will run on the async-pool, so if you plan on doing something\n   blocking or compute heavy, remember to wrap it in a blocking or compute\n   respectively."
+  "Waits ms time and then asynchronously executes value-or-fn, returning a
+   promsie-chan settled with the result.
+
+   value-or-fn will run on the async-pool, so if you plan on doing something
+   blocking or compute heavy, remember to wrap it in a blocking or compute
+   respectively."
   {:inline (fn
              ([ms value-or-fn]
               `
@@ -150,7 +285,15 @@
   ([ms value-or-fn] (com.xadecimal.async-style.impl/defer ms value-or-fn)))
 
 (defn timeout
-  "If chan fulfills before ms time has passed, return a promise-chan settled\n   with the result, else returns a promise-chan settled with a TimeoutException\n   or the result of timed-out-value-or-fn.\n\n   In the case of a timeout, chan will be cancelled.\n\n   timed-out-value-or-fn will run on the async-pool, so if you plan on doing\n   something blocking or compute heavy, remember to wrap it in a blocking or\n   compute respectively."
+  "If chan fulfills before ms time has passed, return a promise-chan settled
+   with the result, else returns a promise-chan settled with a TimeoutException
+   or the result of timed-out-value-or-fn.
+
+   In the case of a timeout, chan will be cancelled.
+
+   timed-out-value-or-fn will run on the async-pool, so if you plan on doing
+   something blocking or compute heavy, remember to wrap it in a blocking or
+   compute respectively."
   {:inline (fn
              ([chan ms] ` (com.xadecimal.async-style.impl/timeout ~chan ~ms))
              ([chan ms timed-out-value-or-fn]
@@ -163,27 +306,63 @@
    (com.xadecimal.async-style.impl/timeout chan ms timed-out-value-or-fn)))
 
 (defn race
-  "Returns a promise-chan that settles as soon as one of the chan in chans\n   fulfill, with the value taken (and joined) from that chan.\n\n   Unlike any, this will also return the first error? to be returned by one of\n   the chans. So if the first chan to fulfill does so with an error?, race will\n   return a promise-chan settled with that error.\n\n   Once a chan fulfills, race cancels all the others."
+  "Returns a promise-chan that settles as soon as one of the chan in chans
+   fulfill, with the value taken (and joined) from that chan.
+
+   Unlike any, this will also return the first error? to be returned by one of
+   the chans. So if the first chan to fulfill does so with an error?, race will
+   return a promise-chan settled with that error.
+
+   Once a chan fulfills, race cancels all the others."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/race ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/race chans)))
 
 (defn any
-  "Returns a promise-chan that settles as soon as one of the chan in chans\n   fulfills in ok?, with the value taken (and joined) from that chan.\n\n   Unlike race, this will ignore chans that fulfilled with an error?. So if the\n   first chan to fulfill does so with an error?, any will keep waiting for\n   another chan to eventually fulfill in ok?.\n\n   If all chans fulfill in error?, returns an error containing the list of all\n   the errors.\n\n   Once a chan fulfills with an ok?, any cancels all the others."
+  "Returns a promise-chan that settles as soon as one of the chan in chans
+   fulfills in ok?, with the value taken (and joined) from that chan.
+
+   Unlike race, this will ignore chans that fulfilled with an error?. So if the
+   first chan to fulfill does so with an error?, any will keep waiting for
+   another chan to eventually fulfill in ok?.
+
+   If all chans fulfill in error?, returns an error containing the list of all
+   the errors.
+
+   Once a chan fulfills with an ok?, any cancels all the others."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/any ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/any chans)))
 
 (defn all-settled
-  "Takes a seqable of chans as an input, and returns a promise-chan that settles\n   after all of the given chans have fulfilled in ok? or error?, with a vector of\n   the taken ok? results and error? results of the input chans.\n\n   It is typically used when you have multiple asynchronous tasks that are not\n   dependent on one another to complete successfully, or you'd always like to\n   know the result of each chan even when one errors.\n\n   In comparison, the promise-chan returned by all may be more appropriate if\n   the tasks are dependent on each other / if you'd like to immediately stop upon\n   any of them returning an error?."
+  "Takes a seqable of chans as an input, and returns a promise-chan that settles
+   after all of the given chans have fulfilled in ok? or error?, with a vector of
+   the taken ok? results and error? results of the input chans.
+
+   It is typically used when you have multiple asynchronous tasks that are not
+   dependent on one another to complete successfully, or you'd always like to
+   know the result of each chan even when one errors.
+
+   In comparison, the promise-chan returned by all may be more appropriate if
+   the tasks are dependent on each other / if you'd like to immediately stop upon
+   any of them returning an error?."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all-settled ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all-settled chans)))
 
 (defn all
-  "Takes a seqable of chans as an input, and returns a promise-chan that settles\n   after all of the given chans have fulfilled in ok?, with a vector of the taken\n   ok? results of the input chans. This returned promise-chan will settle when\n   all of the input's chans have fulfilled, or if the input seqable contains no\n   chans (only values or empty). It settles in error? immediately upon any of the\n   input chans returning an error? or non-chans throwing an error?, and will\n   contain the error? of the first taken chan to return one."
+  "Takes a seqable of chans as an input, and returns a promise-chan that settles
+   after all of the given chans have fulfilled in ok?, with a vector of the taken
+   ok? results of the input chans. This returned promise-chan will settle when
+   all of the input's chans have fulfilled, or if the input seqable contains no
+   chans (only values or empty). It settles in error? immediately upon any of the
+   input chans returning an error? or non-chans throwing an error?, and will
+   contain the error? of the first taken chan to return one."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all chans)))
 
 (defmacro do!
-  "Execute expressions one after the other, awaiting the result of each one\n   before moving on to the next. Results are lost to the void, same as\n   clojure.core/do, so side effects are expected. Returns a promise-chan which\n   settles with the result of the last expression when the entire do! is done."
+  "Execute expressions one after the other, awaiting the result of each one
+   before moving on to the next. Results are lost to the void, same as
+   clojure.core/do, so side effects are expected. Returns a promise-chan which
+   settles with the result of the last expression when the entire do! is done."
   {}
   ([& exprs] ` (com.xadecimal.async-style.impl/do! ~@exprs)))
 
@@ -200,7 +379,9 @@
    (com.xadecimal.async-style.impl/clet ~bindings ~@exprs)))
 
 (defmacro time
-  "Evaluates expr and prints the time it took. Returns the value of expr. If\n   expr evaluates to a channel, it waits for channel to fulfill before printing\n   the time it took."
+  "Evaluates expr and prints the time it took. Returns the value of expr. If
+   expr evaluates to a channel, it waits for channel to fulfill before printing
+   the time it took."
   {}
   ([expr] ` (com.xadecimal.async-style.impl/time ~expr)))
 
