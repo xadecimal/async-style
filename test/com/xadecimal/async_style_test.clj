@@ -2,7 +2,7 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [com.xadecimal.async-style :as a :refer :all]
-            [com.xadecimal.async-style-test-utils :refer [testa q! dq!]])
+            [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException]
            [clojure.core.async.impl.channels ManyToManyChannel]))

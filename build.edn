@@ -1,0 +1,15 @@
+{:lib com.xadecimal/async-style
+ :version "0.1.0-SNAPSHOT"
+ :description "JavaScript's async/await and promise APIs ported to Clojure, plus some extra goodies to let you program in an async style."
+ :licenses [{:name "MIT License"
+             :url "https://github.com/xadecimal/async-style/blob/main/LICENSE"}]
+ :documents [{:file "README.md"
+              :match ":deps \\{com\\.xadecimal\\/async-style"
+              :action :replace
+              :keep-indent? true
+              :text "{:deps {com.xadecimal/async-style {:mvn/version \"{{version}}\"}}}"}
+             {:file "README.md"
+              :match "\\[com\\.xadecimal\\/async-style"
+              :action :replace
+              :keep-indent? true
+              :text "[com.xadecimal/async-style \"{{version}}\"]"}]}
