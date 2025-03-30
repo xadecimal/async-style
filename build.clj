@@ -56,11 +56,11 @@
            #'impl/<<!!
            #'impl/<<?
            #'impl/<<??
-           #'impl/ex-details
            #'impl/async
            #'impl/blocking
            #'impl/compute
            #'impl/await
+           #'impl/wait
            #'impl/catch
            #'impl/finally
            #'impl/then

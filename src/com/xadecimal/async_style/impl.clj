@@ -5,7 +5,6 @@
             [clojure.walk :as walk])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
            [clojure.lang Agent]
-           [java.util Collections]
            [java.util.concurrent CancellationException TimeoutException]))
 
 
@@ -15,6 +14,7 @@
 ;; TODO: Add ClojureScript support
 ;; TODO: Check how it works with clojure.test and cljs.test, there is an async test function in cljs, but how would it work in Clojure?
 ;; TODO: Think if cancelled? should change so instead of returning true/false, it throws if cancelled
+;; TODO: Maybe wrapping in reduced when canceling isn't useful, and it should just return the value directly
 
 
 (def ^:private compute-pool
@@ -91,13 +91,14 @@
   [v]
   (instance? ManyToManyChannel v))
 
-;; Used by the cancellation machinery, will be bound to a channel
-;; that will indicate if the current execution has been cancelled.
-;; Users are expected when inside an execution block like async,
-;; blocking or compute to check this channel using cancelled? to
-;; see if someone tried to cancel their execution, in which case
-;; they should short-circuit as soon as they can.
 (def ^:private ^:dynamic *cancellation-chan*)
+(alter-meta! #'*cancellation-chan* assoc :doc
+             "Used by the cancellation machinery, will be bound to a channel
+that will indicate if the current execution has been cancelled.
+Users are expected when inside an execution block like async,
+blocking or compute to check this channel using cancelled? to
+see if someone tried to cancel their execution, in which case
+they should short-circuit as soon as they can.")
 
 (defn- cancelled-val?
   "Returns true if v indicates a cancellation as per async-style's cancellation
@@ -128,8 +129,7 @@
    as soon as they can, as it is no longer needed.
 
    The way cancellation is conveyed is by settling the return channel of async,
-   blocking and compute blocks (and their equivalent go-async, go-blocking and
-   go-compute) to a CancellationException, unless passed a v explicitly, in which
+   blocking and compute blocks to a CancellationException, unless passed a v explicitly, in which
    case it will settle it with (reduced v).
 
    That means by default a block that has its execution cancelled will return a
@@ -138,7 +138,7 @@
    the block so it returns a reduced value, pass in a v and the awaiters and
    takers will receive that reduced value instead.
 
-   It is up to processes inside (go-)async, (go-)blocking and (go-)compute
+   It is up to processes inside async, blocking and compute
    blocks to properly check for cancellation on a channel."
   ([chan]
    (when (chan? chan)
@@ -173,7 +173,7 @@
   (let [compute-call- compute-call]
     `(~compute-call- (^:once fn* [] ~@body))))
 
-(defn- go-async'
+(defn- async'
   "Wraps body in a way that it executes in an async or blocking block with
    support for cancellation, implicit-try, and returning a promise-chan settled
    with the result or any exception thrown."
@@ -192,17 +192,17 @@
                     t#))))))
        ret#)))
 
-(defmacro ^:private go-async
+(defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
    implicit-try, and returning a promise-chan settled with the result or any
    exception thrown.
 
    body will run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, use go-blocking or go-compute instead."
+   or compute heavy, use blocking or compute instead."
   [& body]
-  (go-async' body :async))
+  (async' body :async))
 
-(defmacro ^:private go-blocking
+(defmacro blocking
   "Asynchronously execute body on the blocking-pool with support for
    cancellation, implicit-try, and returning a promise-chan settled with the
    result or any exception thrown.
@@ -210,19 +210,19 @@
    body will run on the blocking-pool, so use this when you will be blocking or
    doing blocking io only."
   [& body]
-  (go-async' body :blocking))
+  (async' body :blocking))
 
-(defmacro ^:private go-compute
+(defmacro compute
   "Asynchronously execute body on the compute-pool with support for
    cancellation, implicit-try, and returning a promise-chan settled with the
    result or any exception thrown.
 
    body will run on the compute-pool, so use this when you will be doing heavy
-   computation, and don't block, if you're going to block use go-blocking
+   computation, and don't block, if you're going to block use blocking
    instead. If you're doing a very small computation, like polling another chan,
-   use go-async instead."
+   use async instead."
   [& body]
-  (go-async' body :compute))
+  (async' body :compute))
 
 (defn- join'
   "Parking take from chan, but if result taken is still a chan?, further parking
@@ -306,178 +306,20 @@
    and with taken result fully joined. Supports implicit-try to handle thrown
    exceptions such as:
 
-   (async
-     (<<? (async (/ 1 0))
+   (<<? (async (/ 1 0))
           (catch ArithmeticException e
             (println e))
           (catch Exception e
             (println \"Other unexpected excpetion\"))
-          (finally (println \"done\"))))"
+          (finally (println \"done\")))"
   [chan-or-value & body]
   (first (implicit-try (cons (<<??' chan-or-value) body))))
 
-(defprotocol AsyncExceptionDetails
-  "Used by the ex-details machinery which allows a pseudo stack of async calls
-   to be inspected when exception occurs within async, blocking, compute and
-   await blocks."
-  (register-ex-details [ex details])
-  (get-ex-details [ex]))
-
-(let [ex-details-registry (Collections/synchronizedMap
-                           (java.util.WeakHashMap.))]
-  (defn- register-ex-details-impl
-    [ex details]
-    (.put ex-details-registry ex details)
-    nil)
-  (defn- get-ex-details-impl
-    [ex]
-    (.get ex-details-registry ex)))
-
-(defn ex-details
-  "Returns the asynchronous exception details of an exception thrown from an
-   async, blocking, compute or await block. The details are a kind of stack of
-   exceptions thrown that helps you identify where and from what the exception
-   triggered the exception."
-  [ex]
-  (when (satisfies? AsyncExceptionDetails ex)
-    (get-ex-details ex)))
-
-(defn- ex-async
-  "Create and register a new asynchronous exception details."
-  [& {:keys [msg block form form-env line column cause]}]
-  (locking cause
-    (when-not (satisfies? AsyncExceptionDetails cause)
-      (extend (class cause)
-        AsyncExceptionDetails
-        {:register-ex-details register-ex-details-impl
-         :get-ex-details get-ex-details-impl}))
-    (let [details (get-ex-details cause)
-          new-details {:type ::ex-details
-                       :block block
-                       :msg msg
-                       :source *source-path*
-                       :file *file*
-                       :form form
-                       :form-env form-env
-                       :line line
-                       :column column
-                       :ex-message (ex-message cause)
-                       :ex-data (ex-data cause)
-                       :ex-type (type cause)}]
-      (if-not details
-        (register-ex-details cause [new-details])
-        (register-ex-details cause (conj details new-details)))))
-  cause)
-
-(defn- clean-env-keys
-  "Given an env map from a macro's captured &env, remove out various noise to be
-   left with only relevant env keys."
-  [env]
-  (->> (keys env)
-       (map str)
-       (remove #(re-find #"__" %))
-       (remove #(re-find #"state_" %))
-       (remove #(re-find #"inst_" %))
-       (map symbol)))
-
-(defn- async'
-  "Wraps body in a way that it executes in an async or blocking block with
-   support for cancellation, implicit-try, as well as asynchronous exception
-   details capture, and returning a promise-chan settled with the result or any
-   exception thrown."
-  [form env body execution-type]
-  (let [error-msg "Error in async block"
-        form-str (pr-str form)
-        form-meta (meta form)
-        clean-env-k (clean-env-keys env)
-        line (:line form-meta)
-        column (:column form-meta)
-        ex-async- ex-async
-        settle- settle]
-    `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
-           ret# (a/promise-chan)]
-       (~(case execution-type
-           :blocking `a/thread
-           :async `a/go
-           :compute `compute')
-        (binding [*cancellation-chan* ret#]
-          (when-not (cancelled?)
-            (~settle- ret#
-             (try ~@(implicit-try body)
-                  (catch Throwable t#
-                    (~ex-async-
-                     :msg ~error-msg
-                     :block :async
-                     :form ~form-str
-                     :form-env form-env#
-                     :line ~line
-                     :column ~column
-                     :cause t#)))))))
-       ret#)))
-
-(defmacro async
-  "Asynchronously execute body on the async-pool with support for cancellation,
-   implicit-try, as well as asynchronous exception details capture, and returning
-   a promise-chan settled with the result or any exception thrown.
-
-   body will run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, use blocking or compute instead."
-  [& body]
-  (async' &form &env body :async))
-
-(defmacro blocking
-  "Asynchronously execute body on the blocking-pool with support for
-   cancellation, implicit-try, as well as asynchronous exception details capture,
-   and returning a promise-chan settled with the result or any exception thrown.
-
-   body will run on the blocking-pool, so use this when you will be blocking or
-   doing blocking io only."
-  [& body]
-  (async' &form &env body :blocking))
-
-(defmacro compute
-  "Asynchronously execute body on the compute-pool with support for
-   cancellation, implicit-try, as well as asynchronous exception details capture,
-   and returning a promise-chan settled with the result or any exception thrown.
-
-   body will run on the compute-pool, so use this when you will be doing heavy
-   computation, and don't block, if you're going to block use blocking instead.
-   If you're doing a very small computation, like polling another chan, use async
-   instead."
-  [& body]
-  (async' &form &env body :compute))
-
-(defn- await'
-  "Wraps chan-or-value in a way that it does a parking take on it, and if any
-   errors are returned by the take, it re-throws it as asynchronous exception
-   with details, otherwise returns the value or the taken value from chan."
-  [form env chan-or-value]
-  (let [error-msg "Error in await block"
-        form-str (pr-str form)
-        form-meta (meta form)
-        clean-env-k (clean-env-keys env)
-        line (:line form-meta)
-        column (:column form-meta)
-        ex-async- ex-async]
-    `(let [form-env# ~(zipmap (mapv #(list 'quote %) clean-env-k) clean-env-k)
-           value-or-error# (<<! ~chan-or-value)]
-       (if (error? value-or-error#)
-         (throw
-          (~ex-async-
-           :msg ~error-msg
-           :block :await
-           :form ~form-str
-           :form-env form-env#
-           :line ~line
-           :column ~column
-           :cause value-or-error#))
-         value-or-error#))))
-
 (defmacro await
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined. As opposed to <<?, await captures
-   additional details when it throws an exception which can be retrieved using
-   ex-details and helps to debug where and what causes an exception.
+   and with taken result fully joined.
+
+   Same as <<?
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -489,7 +331,24 @@
               (println \"Other unexpected excpetion\"))
             (finally (println \"done\"))))"
   [chan-or-value & body]
-  (first (implicit-try (cons (await' &form &env chan-or-value) body))))
+  (first (implicit-try (cons (<<?' chan-or-value) body))))
+
+(defmacro wait
+  "Blocking takes from chan-or-value so that any exception taken is re-thrown,
+   and with taken result fully joined.
+
+   Same as <<??
+
+   Supports implicit-try to handle thrown exceptions such as:
+
+   (wait (async (/ 1 0))
+         (catch ArithmeticException e
+           (println e))
+         (catch Exception e
+           (println \"Other unexpected excpetion\"))
+         (finally (println \"done\")))"
+  [chan-or-value & body]
+  (first (implicit-try (cons (<<??' chan-or-value) body))))
 
 (defn catch
   "Parking takes fully joined value from chan. If value is an error of
@@ -502,13 +361,13 @@
    blocking or compute heavy, remember to wrap it in a blocking or compute
    respectively."
   ([chan error-handler]
-   (go-async
+   (async
      (let [v (<<! chan)]
        (if (error? v)
          (error-handler v)
          v))))
   ([chan pred-or-type error-handler]
-   (go-async
+   (async
      (let [v (<<! chan)]
        (if (error? v)
          (cond (and (class? pred-or-type) (instance? pred-or-type v))
@@ -528,10 +387,10 @@
    f will run on the async-pool, so if you plan on doing something blocking or
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
-  (go-async
-    (let [res (<<! chan)]
-      (f res)
-      res)))
+  (async
+      (let [res (<<! chan)]
+        (f res)
+        res)))
 
 (defn then
   "Asynchronously executes f with the result of chan once available, unless chan
@@ -542,11 +401,11 @@
    f will run on the async-pool, so if you plan on doing something blocking or
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
-  (go-async
-    (let [v (<<! chan)]
-      (if (error? v)
-        v
-        (f v)))))
+  (async
+      (let [v (<<! chan)]
+        (if (error? v)
+          v
+          (f v)))))
 
 (defn chain
   "Chains multiple then together starting with chan like:
@@ -574,11 +433,11 @@
    plan on doing something blocking or compute heavy, remember to wrap it in a
    blocking or compute respectively."
   ([chan f]
-   (go-async
+   (async
      (let [v (<<! chan)]
        (f v))))
   ([chan ok-handler error-handler]
-   (go-async
+   (async
      (let [v (<<! chan)]
        (if (error? v)
          (error-handler v)
@@ -588,7 +447,7 @@
   "Asynchronously sleep ms time, returns a promise-chan which settles after ms
    time."
   [ms]
-  (go-async (a/<! (a/timeout ms))))
+  (async (a/<! (a/timeout ms))))
 
 (defn defer
   "Waits ms time and then asynchronously executes value-or-fn, returning a
@@ -597,13 +456,12 @@
    value-or-fn will run on the async-pool, so if you plan on doing something
    blocking or compute heavy, remember to wrap it in a blocking or compute
    respectively."
-  ;; TODO: Improve error details message for defer
   [ms value-or-fn]
-  (go-async (a/<! (a/timeout ms))
-            (when-not (cancelled?)
-              (if (fn? value-or-fn)
-                (value-or-fn)
-                value-or-fn))))
+  (async (a/<! (a/timeout ms))
+    (when-not (cancelled?)
+      (if (fn? value-or-fn)
+        (value-or-fn)
+        value-or-fn))))
 
 (defn timeout
   "If chan fulfills before ms time has passed, return a promise-chan settled
@@ -615,21 +473,20 @@
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
    compute respectively."
-  ;; TODO: Improve error details message for timeout
   ([chan ms]
    (timeout chan ms (TimeoutException. (str "Channel timed out: " ms "ms."))))
   ([chan ms timed-out-value-or-fn]
-   (go-async (let [deferred (defer ms ::timed-out)
-                   res (first (a/alts! [chan deferred]))]
-               (cond (= ::timed-out res)
-                     (do
-                       (cancel chan)
-                       (if (fn? timed-out-value-or-fn)
-                         (timed-out-value-or-fn)
-                         timed-out-value-or-fn))
-                     :else
-                     (do (cancel deferred)
-                         res))))))
+   (async (let [deferred (defer ms ::timed-out)
+                res (first (a/alts! [chan deferred]))]
+            (cond (= ::timed-out res)
+                  (do
+                    (cancel chan)
+                    (if (fn? timed-out-value-or-fn)
+                      (timed-out-value-or-fn)
+                      timed-out-value-or-fn))
+                  :else
+                  (do (cancel deferred)
+                      res))))))
 
 (defn race
   "Returns a promise-chan that settles as soon as one of the chan in chans
@@ -701,13 +558,13 @@
    the tasks are dependent on each other / if you'd like to immediately stop upon
    any of them returning an error?."
   [chans]
-  (go-async
-    (loop [res [] chan (first chans) chans (next chans)]
-      (if chan
-        (recur (conj res (<<! chan))
-               (first chans)
-               (next chans))
-        res))))
+  (async
+      (loop [res [] chan (first chans) chans (next chans)]
+        (if chan
+          (recur (conj res (<<! chan))
+                 (first chans)
+                 (next chans))
+          res))))
 
 (defn all
   "Takes a seqable of chans as an input, and returns a promise-chan that settles
@@ -740,17 +597,17 @@
     ret))
 
 (defmacro do!
-  ;;TODO: Improve the error reporting with ex-details of do!
   "Execute expressions one after the other, awaiting the result of each one
    before moving on to the next. Results are lost to the void, same as
    clojure.core/do, so side effects are expected. Returns a promise-chan which
    settles with the result of the last expression when the entire do! is done."
   [& exprs]
   `(async
-     ~@(map #(list `await %) exprs)))
+       ~@(map #(list `await %) exprs)))
 
 (defmacro alet
-  ;;TODO: Improve the error reporting with ex-details of alet
+  "Asynchronous let. Binds result of async expressions to local binding, executing
+   bindings in order one after the other."
   [bindings & exprs]
   `(async
      (clojure.core/let
@@ -760,8 +617,11 @@
        ~@exprs)))
 
 (defmacro clet
+  "Concurrent let. Executes all bound expressions in an async block, therefore
+   bindings run concurrently, but if a following binding or the body depends on
+   a previous binding, it'll be awaited. This means bindings occur concurrently
+   or sequentially automatically based on the dependencies between them."
   [bindings & exprs]
-  ;;TODO: Improve the error reporting with ex-details of clet
   (clojure.core/let [[new-bindings prior-syms-replace-map]
                      (-> (reduce
                           (fn [[acc prior-syms-replace-map] [sym val]]
@@ -783,17 +643,19 @@
   "Evaluates expr and prints the time it took. Returns the value of expr. If
    expr evaluates to a channel, it waits for channel to fulfill before printing
    the time it took."
-  [expr]
-  (let [chan?- chan?]
-    `(let [start# (System/nanoTime)
-           prn-time-fn# (fn prn-time-fn#
-                          ([~'_] (prn-time-fn#))
-                          ([] (prn (str "Elapsed time: " (/ (double (- (System/nanoTime) start#)) 1000000.0) " msecs"))))
-           ret# ~expr]
-       (if (~chan?- ret#)
-         (-> ret# (handle prn-time-fn#))
-         (prn-time-fn#))
-       ret#)))
+  ([expr]
+   `(time ~expr (fn [time-ms#] (prn (str "Elapsed time: " time-ms# " msecs")))))
+  ([expr print-fn]
+   (let [chan?- chan?]
+     `(let [start# (System/nanoTime)
+            prn-time-fn# (fn prn-time-fn#
+                           ([~'_] (prn-time-fn#))
+                           ([] (~print-fn (/ (double (- (System/nanoTime) start#)) 1000000.0))))
+            ret# ~expr]
+        (if (~chan?- ret#)
+          (-> ret# (handle prn-time-fn#))
+          (prn-time-fn#))
+        ret#))))
 
 #_(<<??
       (let [run-count (atom 0)
@@ -829,13 +691,13 @@
 #_(def c
     (time
      (-> (doall (for [_ (range 10)]
-                  (go-blocking (blocking-io))))
+                  (blocking (blocking-io))))
          (all-settled))))
 
 #_(def c
     (time
      (-> (doall (for [_ (range 10)]
-                  (go-async (blocking-io))))
+                  (async (blocking-io))))
          (all-settled))))
 
 #_(->

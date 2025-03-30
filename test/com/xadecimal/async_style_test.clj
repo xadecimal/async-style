@@ -4,7 +4,7 @@
             [com.xadecimal.async-style :as a :refer :all]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
-           [java.util.concurrent CancellationException]
+           [java.util.concurrent CancellationException TimeoutException]
            [clojure.core.async.impl.channels ManyToManyChannel]))
 
 
@@ -284,10 +284,45 @@ value."
          (is (= 1 (<<?? (async (async (async 1))))))))
 
 
-(deftest ex-details-tests)
+(deftest wait-tests
+  (testa "Wait is used to wait on the result of an async operation in a
+synchronous manner, meaning it will block the waiting thread. The upside
+is that unlike await, it can be used outside of an async context."
+         (is (= 3 (-> (async (+ 1 2))
+                      (wait)))))
+  (testa "Takes a value from a chan."
+         (is (= "Hello!" (wait (async "Hello!")))))
 
+  (testa "Blocks if none are available yet, resumes only once a value is available."
+         (let [pc (async (Thread/sleep 100)
+                         "This will only have a value after 100ms")
+               before-time (System/currentTimeMillis)
+               ret (wait pc)
+               after-time (System/currentTimeMillis)]
+           (is (>= (- after-time before-time) 100))
+           (is (= "This will only have a value after 100ms" ret))))
 
-(deftest ex-async-tests)
+  (testa "Should not be used inside an async block, since it will block instead
+of parking."
+         (async (q! (wait (async "Don't do this even though it works."))))
+         (is (= "Don't do this even though it works." (dq!))))
+
+  (testa "Works on values as well, will just return it immediately."
+         (is (= :a-value (wait :a-value)))
+         (is (= 1 (wait 1)))
+         (is (= ["a" "b"] (wait ["a" "b"])))
+         (let [before-time (System/currentTimeMillis)
+               _ (wait :a-value)
+               after-time (System/currentTimeMillis)]
+           (is (<= (- after-time before-time) 1))))
+
+  (testa "If an exception is returned by chan, it will re-throw the exception."
+         (is (thrown? ArithmeticException (wait (async (/ 1 0))))))
+
+  (testa "Taken value will be fully joined. That means if the value taken is
+itself a chan, wait will also take from it, until it eventually takes a non chan
+value."
+         (is (= 1 (wait (async (async (async 1))))))))
 
 
 (deftest async-tests
@@ -750,28 +785,198 @@ things in inner functions."
          (is (= [2 3 4] (dq!)))))
 
 
-(deftest catch-tests)
+(deftest catch-tests
+  (testa "Catch awaits the async value and returns it, but if it was an error
+it calls the provided error handler with the error, and instead return what that
+returns."
+         (-> (async (/ 1 0))
+             (a/catch (fn [_e] 10))
+             (handle q!))
+         (is (= 10 (dq!))))
+  (testa "You can provide a type to filter the error on, it will only call the
+error handler if the error is of that type."
+         (-> (async (/ 1 0))
+             (a/catch ArithmeticException (fn [_e] 10))
+             (handle q!)
+             (<<!!))
+         (-> (async (/ 1 0))
+             (a/catch IllegalStateException (fn [_e] 10))
+             (handle q!)
+             (<<!!))
+         (is (= 10 (dq!)))
+         (is (not= 10 (dq!))))
+  (testa "So you can chain it to handle different type of errors in different
+ways."
+         (-> (async (/ 1 0))
+             (a/catch IllegalStateException (fn [_e] 1))
+             (a/catch ArithmeticException (fn [_e] 2))
+             (handle q!))
+         (is (= 2 (dq!))))
+  (testa "You can provide a predicate instead as well, to filter on the error."
+         (-> (async (throw (ex-info "An error" {:type :foo})))
+             (a/catch (fn [e] (= :foo (-> e ex-data :type))) (fn [_e] 10))
+             (handle q!)
+             (<<!!))
+         (-> (async (throw (ex-info "An error" {:type :foo})))
+             (a/catch (fn [e] (= :bar (-> e ex-data :type))) (fn [_e] 10))
+             (handle q!)
+             (<<!!))
+         (is (= 10 (dq!)))
+         (is (not= 10 (dq!)))))
 
 
-(deftest finally-tests)
+(deftest finally-tests
+  (testa "Finally runs a function f after a value is fulfilled on the chan for
+side-effect."
+         (-> (async (+ 1 2))
+             (finally (fn [v] (q! (str "We got " v))))
+             (handle q!))
+         (is (= "We got 3" (dq!)))
+         (is (= 3 (dq!))))
+  (testa "The function f is called even if it errored."
+         (-> (async (/ 1 0))
+             (finally (fn [v] (q! (str "We got " v))))
+             (handle q!))
+         (is (= "We got 3" (dq!)))
+         (is (a/error? (dq!))))
+  (testa "It's nice to combine with catch"
+         (-> (async (/ 1 0))
+             (catch (fn [e] :error))
+             (finally (fn [v] (q! (str "We got " v))))
+             (handle q!))
+         (is (= "We got :error" (dq!)))
+         (is (= :error (dq!)))))
 
 
-(deftest then-tests)
+(deftest then-tests
+  (testa "To do something after a value is fulfilled use then"
+         (-> (async (+ 1 2))
+             (then inc)
+             (then -)
+             (then q!))
+         (is (= -4 (dq!))))
+  (testa "It won't be called if an error occurred, instead the error will be
+returned and 'then' short-circuits."
+         (-> (async (/ 1 0))
+             (then inc)
+             (handle q!))
+         (is (error? (dq!))))
+  (testa "Which is nice to combine with catch and finally."
+         (-> (async (/ 1 0))
+             (then inc)
+             (catch (fn [_e] 0))
+             (finally (fn [_v] (q! "Compute done")))
+             (handle q!))
+         (is (= "Compute done" (dq!)))
+         (is (= 0 (dq!)))))
 
 
-(deftest chain-tests)
+(deftest chain-tests
+  (testa "If you want to chain operations, as if by 'then', you an use chain
+as well, which can be cleaner."
+         (-> (async (+ 1 2))
+             (chain inc inc #(* 2 %) -)
+             (handle q!))
+         (is (= -10 (dq!))))
+  (testa "Like 'then', it short-circuit on first error and returns the error
+ instead."
+         (-> (async (+ 1 2))
+             (chain inc #(/ % 0) #(* 2 %) -)
+             (handle q!))
+         (is (error? (dq!))))
+  (testa "Which makes it nice to combine with catch and finally."
+         (-> (async (+ 1 2))
+             (chain inc #(/ % 0) #(* 2 %) -)
+             (catch (fn [_e] 0))
+             (finally (fn [_v] (q! "Compute done")))
+             (handle q!))
+         (is (= "Compute done" (dq!)))
+         (is (= 0 (dq!)))))
 
 
-(deftest handle-tests)
+(deftest handle-tests
+  (testa "Handle is used to handle the fulfilled chan result no matter if
+it succeeded or errored."
+         (-> (async (+ 1 2))
+             (handle q!))
+         (is (= 3 (dq!)))
+         (-> (async (/ 1 0))
+             (handle q!))
+         (is (error? (dq!))))
+  (testa "You can pass it two handlers if you want a different handling if
+the result is a success versus an error."
+         (-> (async (+ 1 2))
+             (handle (fn on-ok [v] (inc v))
+                     (fn on-error [_e] 0))
+             (handle q!))
+         (is (= 4 (dq!)))
+         (-> (async (/ 1 0))
+             (handle (fn on-ok [v] (inc v))
+                     (fn on-error [_e] 0))
+             (handle q!))
+         (is (= 0 (dq!)))))
 
 
-(deftest sleep-tests)
+(deftest sleep-tests
+  (testa "Sleep can be used to sleep X millisecond time inside an async process."
+         (-> (async (let [curr-time (System/currentTimeMillis)
+                          _ (await (sleep 400))
+                          end-time (System/currentTimeMillis)]
+                      (- end-time curr-time)))
+             (handle q!))
+         (is (<= 400 (dq!) 500))))
 
 
-(deftest defer-tests)
+(deftest defer-tests
+  (testa "Defer can be used to schedule something in the future."
+         (defer 400 #(q! :done))
+         (is (= :timeout (dq! 300)))
+         (is (= :done (dq!))))
+  (testa "Or to delay returning a value"
+         (-> (defer 400 :done)
+             (handle q!))
+         (is (= :timeout (dq! 300)))
+         (is (= :done (dq!)))))
 
 
-(deftest timeout-tests)
+(deftest timeout-tests
+  (testa "When you want to wait for a chan to fulfill up too some time in
+millisecond you use timeout. It returns a TimeoutException on timeout."
+         (-> (timeout (sleep 1000) 500)
+             (handle q!))
+         (is (instance? TimeoutException (dq!))))
+  (testa "Or if you prefer you can have it return a value of your choosing on
+timeout instead."
+         (-> (timeout (sleep 1000) 500 :it-timed-out)
+             (handle q!))
+         (is (= :it-timed-out (dq!))))
+  (testa "Or if you prefer you can have it run and return a function f of your
+choosing on timeout instead."
+         (-> (timeout (sleep 1000) 500 #(do (q! "It timed out!") :it-timed-out))
+             (handle q!))
+         (is (= "It timed out!" (dq!)))
+         (is (= :it-timed-out (dq!))))
+  (testa "When it doesn't time out, it returns the value from the chan."
+         (-> (timeout (async (+ 1 2)) 500)
+             (handle q!))
+         (is (= 3 (dq!))))
+  (testa "When it does time out, chan will also be cancelled if possible."
+         (-> (timeout
+              (blocking (loop [i 0]
+                          (when-not (cancelled?)
+                            (q! i)
+                            (Thread/sleep 100)
+                            (recur (inc i)))))
+              500
+              :it-timed-out)
+             (handle q!)
+             (wait))
+         (let [[x & xs] (loop [xs [] x (dq!)]
+                          (if (= x :it-timed-out)
+                            (into [x] xs)
+                            (recur (conj xs x) (dq!))))]
+           (is (> (count xs) 3))
+           (is (= :it-timed-out x)))))
 
 
 (deftest race-tests
@@ -1054,7 +1259,16 @@ to nil."
          (is (nil? (dq!)))))
 
 
-(deftest do!-tests)
+(deftest do!-tests
+  (testa "Use do! to perform asynchronous ops one after the other and
+return the result of the last one only."
+         (-> (do! (blocking (q! :log))
+                  (blocking (q! :prep-database))
+                  (blocking :run-query))
+             (handle q!))
+         (is (= :log (dq!)))
+         (is (= :prep-database (dq!)))
+         (is (= :run-query (dq!)))))
 
 
 (deftest alet-tests
@@ -1087,5 +1301,29 @@ awaited, then the second, then the third, etc."
 
 (deftest clet-tests)
 
+(wait
+    (clet
+        [a (blocking (Thread/sleep 100) 20)
+         b (+ 1 2 3 a)
+         c (blocking (Thread/sleep (+ 100)) b)]
+      (+ a b c)))
 
-(deftest time-tests)
+
+(deftest time-tests
+  (testa "If you want to measure the time an async ops takes to fulfill, you can
+wrap it with time. By default it prints to stdout."
+         (-> (sleep 1000)
+             (time)
+             wait))
+  (testa "You can pass a custom print-fn as the second argument instead."
+         (-> (sleep 1000)
+             (time q!)
+             wait)
+         (is (< 1000 (dq!) 1010)))
+  (testa "It can also be used to time non-async ops."
+         (-> (+ 1 2 3)
+             (time q!))
+         (is (< 0 (dq!) 1)))
+  (testa "Unlike clojure.core/time, this one returns the value of what it
+times and not nil."
+         (is (= 3 (time (+ 1 2))))))

@@ -56,8 +56,7 @@
    as soon as they can, as it is no longer needed.
 
    The way cancellation is conveyed is by settling the return channel of async,
-   blocking and compute blocks (and their equivalent go-async, go-blocking and
-   go-compute) to a CancellationException, unless passed a v explicitly, in which
+   blocking and compute blocks to a CancellationException, unless passed a v explicitly, in which
    case it will settle it with (reduced v).
 
    That means by default a block that has its execution cancelled will return a
@@ -66,7 +65,7 @@
    the block so it returns a reduced value, pass in a v and the awaiters and
    takers will receive that reduced value instead.
 
-   It is up to processes inside (go-)async, (go-)blocking and (go-)compute
+   It is up to processes inside async, blocking and compute
    blocks to properly check for cancellation on a channel."
   {:inline (fn
              ([chan] ` (com.xadecimal.async-style.impl/cancel ~chan))
@@ -111,30 +110,21 @@
    and with taken result fully joined. Supports implicit-try to handle thrown
    exceptions such as:
 
-   (async
-     (<<? (async (/ 1 0))
+   (<<? (async (/ 1 0))
           (catch ArithmeticException e
             (println e))
           (catch Exception e
             (println \"Other unexpected excpetion\"))
-          (finally (println \"done\"))))"
+          (finally (println \"done\")))"
   {}
   ([chan-or-value & body]
    `
    (com.xadecimal.async-style.impl/<<?? ~chan-or-value ~@body)))
 
-(defn ex-details
-  "Returns the asynchronous exception details of an exception thrown from an
-   async, blocking, compute or await block. The details are a kind of stack of
-   exceptions thrown that helps you identify where and from what the exception
-   triggered the exception."
-  {:inline (fn ([ex] ` (com.xadecimal.async-style.impl/ex-details ~ex)))}
-  ([ex] (com.xadecimal.async-style.impl/ex-details ex)))
-
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
-   implicit-try, as well as asynchronous exception details capture, and returning
-   a promise-chan settled with the result or any exception thrown.
+   implicit-try, and returning a promise-chan settled with the result or any
+   exception thrown.
 
    body will run on the async-pool, so if you plan on doing something blocking
    or compute heavy, use blocking or compute instead."
@@ -143,8 +133,8 @@
 
 (defmacro blocking
   "Asynchronously execute body on the blocking-pool with support for
-   cancellation, implicit-try, as well as asynchronous exception details capture,
-   and returning a promise-chan settled with the result or any exception thrown.
+   cancellation, implicit-try, and returning a promise-chan settled with the
+   result or any exception thrown.
 
    body will run on the blocking-pool, so use this when you will be blocking or
    doing blocking io only."
@@ -153,21 +143,21 @@
 
 (defmacro compute
   "Asynchronously execute body on the compute-pool with support for
-   cancellation, implicit-try, as well as asynchronous exception details capture,
-   and returning a promise-chan settled with the result or any exception thrown.
+   cancellation, implicit-try, and returning a promise-chan settled with the
+   result or any exception thrown.
 
    body will run on the compute-pool, so use this when you will be doing heavy
-   computation, and don't block, if you're going to block use blocking instead.
-   If you're doing a very small computation, like polling another chan, use async
-   instead."
+   computation, and don't block, if you're going to block use blocking
+   instead. If you're doing a very small computation, like polling another chan,
+   use async instead."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/compute ~@body)))
 
 (defmacro await
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined. As opposed to <<?, await captures
-   additional details when it throws an exception which can be retrieved using
-   ex-details and helps to debug where and what causes an exception.
+   and with taken result fully joined.
+
+   Same as <<?
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -182,6 +172,25 @@
   ([chan-or-value & body]
    `
    (com.xadecimal.async-style.impl/await ~chan-or-value ~@body)))
+
+(defmacro wait
+  "Blocking takes from chan-or-value so that any exception taken is re-thrown,
+   and with taken result fully joined.
+
+   Same as <<??
+
+   Supports implicit-try to handle thrown exceptions such as:
+
+   (wait (async (/ 1 0))
+         (catch ArithmeticException e
+           (println e))
+         (catch Exception e
+           (println \"Other unexpected excpetion\"))
+         (finally (println \"done\")))"
+  {}
+  ([chan-or-value & body]
+   `
+   (com.xadecimal.async-style.impl/wait ~chan-or-value ~@body)))
 
 (defn catch
   "Parking takes fully joined value from chan. If value is an error of
@@ -367,12 +376,18 @@
   ([& exprs] ` (com.xadecimal.async-style.impl/do! ~@exprs)))
 
 (defmacro alet
+  "Asynchronous let. Binds result of async expression to local binding, executing
+   bindings in order one after the other."
   {}
   ([bindings & exprs]
    `
    (com.xadecimal.async-style.impl/alet ~bindings ~@exprs)))
 
 (defmacro clet
+  "Concurrent let. Executes all bound expression in an async block, therefore
+   bindings run concurrently, but if a following binding or the body depends on
+   a previous binding, it'll be awaited. This means bindings occur in parallel
+   or sequentially automatically based on the dependencies between them."
   {}
   ([bindings & exprs]
    `
@@ -383,7 +398,8 @@
    expr evaluates to a channel, it waits for channel to fulfill before printing
    the time it took."
   {}
-  ([expr] ` (com.xadecimal.async-style.impl/time ~expr)))
+  ([expr] ` (com.xadecimal.async-style.impl/time ~expr))
+  ([expr print-fn] ` (com.xadecimal.async-style.impl/time ~expr ~print-fn)))
 
 ;;;; DO NOT MODIFY ;;;;
 ;;; WARNING ;;;
