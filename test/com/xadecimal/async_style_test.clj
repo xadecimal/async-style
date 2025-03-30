@@ -1306,7 +1306,7 @@ awaited, then the second, then the third, etc."
         [a (blocking (Thread/sleep 100) 20)
          b (+ 1 2 3 a)
          c (blocking (Thread/sleep (+ 100)) b)]
-      (+ a b c)))
+      (+ a b (await (blocking (+ 1 c))))))
 
 
 (deftest time-tests

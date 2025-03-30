@@ -618,26 +618,55 @@ they should short-circuit as soon as they can.")
 
 (defmacro clet
   "Concurrent let. Executes all bound expressions in an async block, therefore
-   bindings run concurrently, but if a following binding or the body depends on
-   a previous binding, it'll be awaited. This means bindings occur concurrently
-   or sequentially automatically based on the dependencies between them."
+   bindings run concurrently, but if a following binding or the body depends on a
+   previous binding, it'll be awaited. In a blocking/compute context, uses wait
+   instead of await for dependency resolution."
   [bindings & exprs]
-  (clojure.core/let [[new-bindings prior-syms-replace-map]
-                     (-> (reduce
-                          (fn [[acc prior-syms-replace-map] [sym val]]
-                            [(conj acc
-                                   [`~sym `(async ~(walk/postwalk-replace
-                                                    prior-syms-replace-map
-                                                    val))])
-                             (assoc prior-syms-replace-map sym `(await ~sym))])
-                          [[] {}]
-                          (partition 2 bindings)))]
-    `(clojure.core/let
-         [~@(apply concat new-bindings)]
-       (async
-         ~@(walk/postwalk-replace
-            prior-syms-replace-map
-            exprs)))))
+  (letfn [(transform-await [form blocking?]
+            (cond
+              ;; If entering a blocking/compute form, mark context as blocking.
+              (and (seq? form)
+                   (symbol? (first form))
+                   (#{'blocking 'compute `blocking `compute} (first form)))
+              (if (list? form)
+                (apply list (map #(transform-await % true) form))
+                (into (empty form) (map #(transform-await % true) form)))
+              ;; Within a blocking context, convert (await ...) to (wait ...)
+              (and blocking?
+                   (seq? form)
+                   (symbol? (first form))
+                   (#{'await `await} (first form)))
+              (if (list? form)
+                (apply list (cons `wait (map #(transform-await % blocking?) (rest form))))
+                (into (empty form) (cons `wait (map #(transform-await % blocking?) (rest form)))))
+              ;; For any other seq, process its elements.
+              (seq? form)
+              (if (list? form)
+                (apply list (map #(transform-await % blocking?) form))
+                (into (empty form) (map #(transform-await % blocking?) form)))
+              ;; For other collections, recur on their elements.
+              (coll? form)
+              (into (empty form) (map #(transform-await % blocking?) form))
+              :else form))]
+    ;; For each binding, perform symbol replacement then transform blocking awaits.
+    (let [[new-bindings prior-map]
+          (reduce
+           (fn [[acc m] [sym val]]
+             (let [;; First replace prior symbols with (await sym) in the binding's value.
+                   new-val (clojure.walk/postwalk-replace m val)
+                   ;; Then, transform it: if it contains blocking forms, convert inner awaits to waits.
+                   new-val-transformed (transform-await new-val false)]
+               [(conj acc `[~sym ~(list `async new-val-transformed)])
+                (assoc m sym (list `await sym))]))
+           [[] {}]
+           (partition 2 bindings))]
+      `(let [~@(apply concat new-bindings)]
+         (async
+           ~(let [body (clojure.walk/postwalk-replace prior-map
+                                                      (if (> (count exprs) 1)
+                                                        (cons `do exprs)
+                                                        (first exprs)))]
+              (transform-await body false)))))))
 
 (defmacro time
   "Evaluates expr and prints the time it took. Returns the value of expr. If
