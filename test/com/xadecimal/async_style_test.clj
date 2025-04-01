@@ -1357,6 +1357,13 @@ not useful, this is just to test that it works."
            (q! b))
          (is (= {10 10} (dq!))))
 
+  (testa "It preserves meta."
+         (clet
+             [a ^{:foo "bar"} [1 2 3]
+              b a]
+           (q! b))
+         (is (= {:foo "bar"} (meta (dq!)))))
+
   (testa "Testing some edge case, proper rewriting inside the body should also
 happen where bindings are replaced by await or wait depending on their context."
          (time

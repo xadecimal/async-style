@@ -384,9 +384,9 @@ they should short-circuit as soon as they can.")
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
   (async
-      (let [res (<<! chan)]
-        (f res)
-        res)))
+    (let [res (<<! chan)]
+      (f res)
+      res)))
 
 (defn then
   "Asynchronously executes f with the result of chan once available, unless chan
@@ -398,10 +398,10 @@ they should short-circuit as soon as they can.")
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
   (async
-      (let [v (<<! chan)]
-        (if (error? v)
-          v
-          (f v)))))
+    (let [v (<<! chan)]
+      (if (error? v)
+        v
+        (f v)))))
 
 (defn chain
   "Chains multiple then together starting with chan like:
@@ -454,10 +454,10 @@ they should short-circuit as soon as they can.")
    respectively."
   [ms value-or-fn]
   (async (a/<! (a/timeout ms))
-    (when-not (cancelled?)
-      (if (fn? value-or-fn)
-        (value-or-fn)
-        value-or-fn))))
+         (when-not (cancelled?)
+           (if (fn? value-or-fn)
+             (value-or-fn)
+             value-or-fn))))
 
 (defn timeout
   "If chan fulfills before ms time has passed, return a promise-chan settled
@@ -555,12 +555,12 @@ they should short-circuit as soon as they can.")
    any of them returning an error?."
   [chans]
   (async
-      (loop [res [] chan (first chans) chans (next chans)]
-        (if chan
-          (recur (conj res (<<! chan))
-                 (first chans)
-                 (next chans))
-          res))))
+    (loop [res [] chan (first chans) chans (next chans)]
+      (if chan
+        (recur (conj res (<<! chan))
+               (first chans)
+               (next chans))
+        res))))
 
 (defn all
   "Takes a seqable of chans as an input, and returns a promise-chan that settles
@@ -599,7 +599,7 @@ they should short-circuit as soon as they can.")
    settles with the result of the last expression when the entire do! is done."
   [& exprs]
   `(async
-       ~@(map #(list `await %) exprs)))
+     ~@(map #(list `await %) exprs)))
 
 (defmacro alet
   "Asynchronous let. Binds result of async expressions to local binding, executing
@@ -613,10 +613,26 @@ they should short-circuit as soon as they can.")
        ~@exprs)))
 
 (defmacro clet
-  "Concurrent let. Executes all bound expressions in an async block, therefore
-   bindings run concurrently, but if a following binding or the body depends on a
-   previous binding, it'll be awaited. In a blocking/compute context, uses wait
-   instead of await for dependency resolution."
+  "Concurrent let. Executes all bound expressions in an async block so that
+   the bindings run concurrently. If a later binding or the body depends on an
+   earlier binding, that reference is automatically replaced with an await.
+   In a blocking/compute context, await is transformed to wait for proper
+   blocking behavior.
+
+   Notes:
+     * Bindings are evaluated in the async-pool; therefore, they should not
+       perform blocking I/O or heavy compute directly. If you need to do blocking
+       operations or heavy compute, wrap the binding in a blocking or compute call.
+     * This macro only supports simple symbol bindings; destructuring (vector or
+       map destructuring) is not supported.
+     * It will transform symbols even inside quoted forms, so literal code in quotes
+       may be rewritten unexpectedly.
+     * Inner local bindings (e.g. via a nested let) that shadow an outer binding are
+       not handled separately; the macro will attempt to rewrite every occurrence,
+       which may lead to incorrect replacements.
+     * Anonymous functions that use parameter names identical to outer bindings
+       will also be rewritten, which can cause unintended behavior if they are meant
+       to shadow those bindings."
   [bindings & body]
   (letfn [(rebuild-form [form new-coll]
             (if (seq? form)
