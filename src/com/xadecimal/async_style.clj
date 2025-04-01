@@ -384,10 +384,26 @@
    (com.xadecimal.async-style.impl/alet ~bindings ~@exprs)))
 
 (defmacro clet
-  "Concurrent let. Executes all bound expressions in an async block, therefore
-   bindings run concurrently, but if a following binding or the body depends on a
-   previous binding, it'll be awaited. In a blocking/compute context, uses wait
-   instead of await for dependency resolution."
+  "Concurrent let. Executes all bound expressions in an async block so that
+   the bindings run concurrently. If a later binding or the body depends on an
+   earlier binding, that reference is automatically replaced with an await.
+   In a blocking/compute context, await is transformed to wait for proper
+   blocking behavior.
+
+   Notes:
+     * Bindings are evaluated in the async-pool; therefore, they should not
+       perform blocking I/O or heavy compute directly. If you need to do blocking
+       operations or heavy compute, wrap the binding in a blocking or compute call.
+     * This macro only supports simple symbol bindings; destructuring (vector or
+       map destructuring) is not supported.
+     * It will transform symbols even inside quoted forms, so literal code in quotes
+       may be rewritten unexpectedly.
+     * Inner local bindings (e.g. via a nested let) that shadow an outer binding are
+       not handled separately; the macro will attempt to rewrite every occurrence,
+       which may lead to incorrect replacements.
+     * Anonymous functions that use parameter names identical to outer bindings
+       will also be rewritten, which can cause unintended behavior if they are meant
+       to shadow those bindings."
   {}
   ([bindings & body] ` (com.xadecimal.async-style.impl/clet ~bindings ~@body)))
 
