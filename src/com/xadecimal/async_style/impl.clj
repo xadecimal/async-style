@@ -655,7 +655,14 @@ they should short-circuit as soon as they can.")
               (seq? form)
               (rebuild-form form
                             (map #(transform-form env % blocking?) form))
-              ;; For other collections, do the same.
+              ;; If it's a map, walk it's k/v pairs.
+              (map? form)
+              (rebuild-form form
+                            (map (fn [[k v]]
+                                   [(transform-form env k blocking?)
+                                    (transform-form env v blocking?)])
+                                 form))
+              ;; For other collections, walk their elements.
               (coll? form)
               (rebuild-form form
                             (map #(transform-form env % blocking?) form))

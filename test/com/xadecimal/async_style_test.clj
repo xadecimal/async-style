@@ -1345,6 +1345,18 @@ not useful, this is just to test that it works."
          (is (= 6.666664664588418E8 (dq!)))
          (is (< 200 (dq!) 220)))
 
+  (testa "It works with sets too."
+         (clet [a 10
+                b #{:a a}]
+           (q! b))
+         (is (= #{:a 10} (dq!))))
+
+  (testa "It works with maps too."
+         (clet [a 10
+                b {a a}]
+           (q! b))
+         (is (= {10 10} (dq!))))
+
   (testa "Testing some edge case, proper rewriting inside the body should also
 happen where bindings are replaced by await or wait depending on their context."
          (time
