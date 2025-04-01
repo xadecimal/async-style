@@ -1,5 +1,5 @@
 {:tasks
- {test (clojure "-X:test")
+ {test (clojure "-M:test")
   gen (clojure "-X:build gen")
   lint (clojure "-X:build lint")
   deploy (clojure "-X:build deploy")

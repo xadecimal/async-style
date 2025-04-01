@@ -376,7 +376,7 @@
   ([& exprs] ` (com.xadecimal.async-style.impl/do! ~@exprs)))
 
 (defmacro alet
-  "Asynchronous let. Binds result of async expression to local binding, executing
+  "Asynchronous let. Binds result of async expressions to local binding, executing
    bindings in order one after the other."
   {}
   ([bindings & exprs]
@@ -384,14 +384,12 @@
    (com.xadecimal.async-style.impl/alet ~bindings ~@exprs)))
 
 (defmacro clet
-  "Concurrent let. Executes all bound expression in an async block, therefore
-   bindings run concurrently, but if a following binding or the body depends on
-   a previous binding, it'll be awaited. This means bindings occur in parallel
-   or sequentially automatically based on the dependencies between them."
+  "Concurrent let. Executes all bound expressions in an async block, therefore
+   bindings run concurrently, but if a following binding or the body depends on a
+   previous binding, it'll be awaited. In a blocking/compute context, uses wait
+   instead of await for dependency resolution."
   {}
-  ([bindings & exprs]
-   `
-   (com.xadecimal.async-style.impl/clet ~bindings ~@exprs)))
+  ([bindings & body] ` (com.xadecimal.async-style.impl/clet ~bindings ~@body)))
 
 (defmacro time
   "Evaluates expr and prints the time it took. Returns the value of expr. If

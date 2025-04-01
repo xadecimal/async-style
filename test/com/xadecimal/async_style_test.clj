@@ -1,19 +1,11 @@
 (ns com.xadecimal.async-style-test
   (:refer-clojure :exclude [await time])
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.test :refer [deftest is]]
             [com.xadecimal.async-style :as a :refer :all]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException TimeoutException]
            [clojure.core.async.impl.channels ManyToManyChannel]))
-
-
-(defn around-tests
-  [tests]
-  (tests)
-  (shutdown-agents))
-
-(use-fixtures :once around-tests)
 
 
 (deftest error?-tests
@@ -835,9 +827,9 @@ side-effect."
          (is (= 3 (dq!))))
   (testa "The function f is called even if it errored."
          (-> (async (/ 1 0))
-             (finally (fn [v] (q! (str "We got " v))))
+             (finally (fn [v] (q! v)))
              (handle q!))
-         (is (= "We got 3" (dq!)))
+         (is (a/error? (dq!)))
          (is (a/error? (dq!))))
   (testa "It's nice to combine with catch"
          (-> (async (/ 1 0))
@@ -1299,14 +1291,127 @@ awaited, then the second, then the third, etc."
     (is (= 3 (dq!)))))
 
 
-(deftest clet-tests)
+(deftest clet-tests
+  (testa "Like Clojure's let, but it runs bindings concurrently."
+         (time
+          (clet
+              [a (defer 100 1)
+               b (defer 100 2)
+               c (defer 100 3)]
+            (q! (+ a b c)))
+          q!)
+         (is (= 6 (dq!)))
+         (is (< 100 (dq!) 110)))
 
-(wait
-    (clet
-        [a (blocking (Thread/sleep 100) 20)
-         b (+ 1 2 3 a)
-         c (blocking (Thread/sleep (+ 100)) b)]
-      (+ a b (await (blocking (+ 1 c))))))
+  (testa "Unless one binding depends on a previous one, in which case that binding
+will await the other, but only the dependent bindings will be sequenced after what
+they depend on, others will still run concurrently."
+         (time
+          (clet
+              [a (defer 100 100)
+               b (defer a 100)
+               c (defer b 100)
+               d (defer 100 0)]
+            (q! (+ a b c d)))
+          q!)
+         (is (= 300 (dq!)))
+         (is (< 300 (dq!) 320)))
+
+  (testa "Bindings evaluate on the async-pool, which means they should not do
+any blocking or heavy compute operation. If you need to do a blocking or compute
+heavy operation wrap it in blocking or compute accordingly."
+         (time
+          (clet
+              [a (compute (reduce + (mapv #(Math/sqrt %) (range 1e6))))
+               b (blocking (Thread/sleep 100) 100)
+               c (defer 100 100)
+               d (defer 100 b)]
+            (q! (+ a b c d)))
+          q!)
+         (is (= 6.666664664588418E8 (dq!)))
+         (is (< 200 (dq!) 220)))
+
+  (testa "You can nest async inside blocking and compute and so on and it'll still
+properly rewrite to await or wait depending on which the binding is inside. This is
+not useful, this is just to test that it works."
+         (time
+          (clet
+              [a (compute (reduce + (mapv #(Math/sqrt %) (range 1e6))))
+               b (defer 100 100)
+               c (blocking (Thread/sleep b) (async b (blocking b)))
+               d (defer 100 b)]
+            (q! (+ a b c d)))
+          q!)
+         (is (= 6.666664664588418E8 (dq!)))
+         (is (< 200 (dq!) 220)))
+
+  (testa "Testing some edge case, proper rewriting inside the body should also
+happen where bindings are replaced by await or wait depending on their context."
+         (time
+          (clet
+              [x 1
+               a (compute x)
+               b (blocking (inc a))
+               c (async (inc b))
+               d (compute (async (inc c)))]
+            (q! (+ a
+                   (await (compute b))
+                   (await (async c))
+                   (await (blocking d))
+                   (await (compute (async a)))
+                   (await (blocking (async a)))
+                   (await (async (blocking a)))
+                   (await (async (compute a)))
+                   (await (compute a (async a (blocking a (async a))))))))
+          q!)
+         (is (= 15 (dq!)))
+         (is (< 0 (dq!) 50))
+         (is (= '(let*
+                     [x (com.xadecimal.async-style.impl/async 1)
+                      a (com.xadecimal.async-style.impl/async
+                          (compute (com.xadecimal.async-style.impl/wait x)))
+                      b (com.xadecimal.async-style.impl/async
+                          (blocking (inc (com.xadecimal.async-style.impl/wait a))))
+                      c (com.xadecimal.async-style.impl/async
+                          (async (inc (com.xadecimal.async-style.impl/await b))))
+                      d (com.xadecimal.async-style.impl/async
+                          (compute (async (inc (com.xadecimal.async-style.impl/await c)))))
+                      e (com.xadecimal.async-style.impl/async
+                          (inc (com.xadecimal.async-style.impl/await d)))]
+                   (com.xadecimal.async-style.impl/async
+                     (+ (com.xadecimal.async-style.impl/await a)
+                        (com.xadecimal.async-style.impl/await e)
+                        (await (compute (com.xadecimal.async-style.impl/wait b)))
+                        (await (async (com.xadecimal.async-style.impl/await c)))
+                        (await (blocking (com.xadecimal.async-style.impl/wait d)))
+                        (await (compute (async (com.xadecimal.async-style.impl/await a))))
+                        (await (blocking (async (com.xadecimal.async-style.impl/await a))))
+                        (await (async (blocking (com.xadecimal.async-style.impl/wait a))))
+                        (await (async (compute (com.xadecimal.async-style.impl/wait a))))
+                        (await (async (compute (com.xadecimal.async-style.impl/wait a))))
+                        (await
+                            (compute (com.xadecimal.async-style.impl/wait a)
+                                     (async (com.xadecimal.async-style.impl/await a)
+                                            (blocking (com.xadecimal.async-style.impl/wait a)
+                                                      (async (com.xadecimal.async-style.impl/await a)))))))))
+                (macroexpand '(com.xadecimal.async-style.impl/clet
+                                  [x 1
+                                   a (compute x)
+                                   b (blocking (inc a))
+                                   c (async (inc b))
+                                   d (compute (async (inc c)))
+                                   e (inc d)]
+                                (+ a
+                                   e
+                                   (await (compute b))
+                                   (await (async c))
+                                   (await (blocking d))
+                                   (await (compute (async a)))
+                                   (await (blocking (async a)))
+                                   (await (async (blocking a)))
+                                   (await (async (compute a)))
+                                   (await (async (compute a)))
+                                   (await (compute a (async a (blocking a (async a))))))))))))
 
 
 (deftest time-tests

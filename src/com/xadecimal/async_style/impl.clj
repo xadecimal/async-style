@@ -1,18 +1,14 @@
 (ns com.xadecimal.async-style.impl
   (:refer-clojure :exclude [await time])
   (:require [clojure.core.async :as a]
-            [clojure.core.async.impl.dispatch :as d]
-            [clojure.walk :as walk])
+            [clojure.core.async.impl.dispatch :as d])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
            [clojure.lang Agent]
            [java.util.concurrent CancellationException TimeoutException]))
 
 
-;; TODO: add support for heavy CPU compute operations, and blocking IO operations
 ;; TODO: add support for CSP style, maybe a process-factory that creates processes with ins/outs channels of buffer 1 and connectors between them
-;; TODO: add full test suite
 ;; TODO: Add ClojureScript support
-;; TODO: Check how it works with clojure.test and cljs.test, there is an async test function in cljs, but how would it work in Clojure?
 ;; TODO: Think if cancelled? should change so instead of returning true/false, it throws if cancelled
 ;; TODO: Maybe wrapping in reduced when canceling isn't useful, and it should just return the value directly
 
@@ -621,52 +617,66 @@ they should short-circuit as soon as they can.")
    bindings run concurrently, but if a following binding or the body depends on a
    previous binding, it'll be awaited. In a blocking/compute context, uses wait
    instead of await for dependency resolution."
-  [bindings & exprs]
-  (letfn [(transform-await [form blocking?]
+  [bindings & body]
+  (letfn [(rebuild-form [form new-coll]
+            (if (seq? form)
+              (with-meta (apply list new-coll) (meta form))
+              (with-meta (into (empty form) new-coll) (meta form))))
+          (transform-form [env form blocking?]
             (cond
-              ;; If entering a blocking/compute form, mark context as blocking.
+              ;; Async call: reset blocking context for subforms.
               (and (seq? form)
                    (symbol? (first form))
-                   (#{'blocking 'compute `blocking `compute} (first form)))
-              (if (list? form)
-                (apply list (map #(transform-await % true) form))
-                (into (empty form) (map #(transform-await % true) form)))
-              ;; Within a blocking context, convert (await ...) to (wait ...)
+                   (#{'async `async} (first form)))
+              (rebuild-form form
+                            (cons (first form)
+                                  (map #(transform-form env % false) (rest form))))
+              ;; In a blocking context, rewrite (await …) to (wait …)
               (and blocking?
                    (seq? form)
                    (symbol? (first form))
                    (#{'await `await} (first form)))
-              (if (list? form)
-                (apply list (cons `wait (map #(transform-await % blocking?) (rest form))))
-                (into (empty form) (cons `wait (map #(transform-await % blocking?) (rest form)))))
-              ;; For any other seq, process its elements.
+              (rebuild-form form
+                            (cons `wait
+                                  (map #(transform-form env % blocking?) (rest form))))
+              ;; Replace a symbol from our environment.
+              (and (symbol? form)
+                   (contains? env form))
+              (if blocking?
+                (second (env form))
+                (first (env form)))
+              ;; Entering a blocking/compute form: set blocking flag.
+              (and (seq? form)
+                   (symbol? (first form))
+                   (#{'blocking `blocking 'compute `compute} (first form)))
+              (rebuild-form form
+                            (map #(transform-form env % true) form))
+              ;; Otherwise, if it's a sequence, walk its elements.
               (seq? form)
-              (if (list? form)
-                (apply list (map #(transform-await % blocking?) form))
-                (into (empty form) (map #(transform-await % blocking?) form)))
-              ;; For other collections, recur on their elements.
+              (rebuild-form form
+                            (map #(transform-form env % blocking?) form))
+              ;; For other collections, do the same.
               (coll? form)
-              (into (empty form) (map #(transform-await % blocking?) form))
-              :else form))]
-    ;; For each binding, perform symbol replacement then transform blocking awaits.
-    (let [[new-bindings prior-map]
-          (reduce
-           (fn [[acc m] [sym val]]
-             (let [;; First replace prior symbols with (await sym) in the binding's value.
-                   new-val (clojure.walk/postwalk-replace m val)
-                   ;; Then, transform it: if it contains blocking forms, convert inner awaits to waits.
-                   new-val-transformed (transform-await new-val false)]
-               [(conj acc `[~sym ~(list `async new-val-transformed)])
-                (assoc m sym (list `await sym))]))
-           [[] {}]
-           (partition 2 bindings))]
-      `(let [~@(apply concat new-bindings)]
-         (async
-           ~(let [body (clojure.walk/postwalk-replace prior-map
-                                                      (if (> (count exprs) 1)
-                                                        (cons `do exprs)
-                                                        (first exprs)))]
-              (transform-await body false)))))))
+              (rebuild-form form
+                            (map #(transform-form env % blocking?) form))
+              :else form))
+          (process-bindings [binding-pairs]
+            (reduce (fn [[env binds] [sym val]]
+                      (let [new-val (transform-form env val false)
+                            ;; Map each bound symbol to a vector: [ (await sym) (wait sym) ]
+                            new-env (assoc env sym [(list `await sym)
+                                                    (list `wait sym)])]
+                        [new-env (conj binds [sym `(async ~new-val)])]))
+                    [{} []]
+                    binding-pairs))]
+    (let [[final-env binds] (process-bindings (partition 2 bindings))
+          body-form (transform-form final-env
+                                    (if (> (count body) 1)
+                                      (cons `do body)
+                                      (first body))
+                                    false)]
+      `(let [~@(apply concat binds)]
+         (async ~body-form)))))
 
 (defmacro time
   "Evaluates expr and prints the time it took. Returns the value of expr. If
@@ -685,74 +695,3 @@ they should short-circuit as soon as they can.")
           (-> ret# (handle prn-time-fn#))
           (prn-time-fn#))
         ret#))))
-
-#_(<<??
-      (let [run-count (atom 0)
-            chans (for [i (range 100)]
-                    (async (do (swap! run-count inc) i)))]
-        (mapv #(cancel % :cancel) (drop 1 chans))
-        (let [res (race chans)]
-          (Thread/sleep 1100)
-          (println "Run-count: " @run-count)
-          res)))
-
-#_(let [a (defer 110 #(do (println :a) :a))
-        b (defer 100 #(do (println :b) :b))
-        c (defer 80 #(do (println :c) (/ 1 0)))]
-    #_(defer 60 #(cancel b :foo))
-    (<<?? (all [a b c])))
-
-;;async
-;;do
-;;alet
-;;clet
-
-#_(defn blocking-io
-    "Simulated blocking IO by blocking thread for 200ms."
-    []
-    (Thread/sleep 200))
-
-#_(defn non-blocking-io
-    "Simulated non-blocking IO by settling promise chan after 200ms."
-    []
-    (sleep 200))
-
-#_(def c
-    (time
-     (-> (doall (for [_ (range 10)]
-                  (blocking (blocking-io))))
-         (all-settled))))
-
-#_(def c
-    (time
-     (-> (doall (for [_ (range 10)]
-                  (async (blocking-io))))
-         (all-settled))))
-
-#_(->
-   (do!
-     (blocking (blocking-io))
-     (blocking (blocking-io))
-     (blocking (blocking-io))
-     (blocking (blocking-io))
-     (blocking (blocking-io))
-     (non-blocking-io)
-     (non-blocking-io)
-     (non-blocking-io)
-     (non-blocking-io))
-   (time)
-   (catch #(clojure.pprint/pprint (ex-details %))))
-
-#_(->
-   (do!
-     (blocking-io)
-     (blocking-io)
-     (blocking-io)
-     (blocking-io)
-     (blocking-io)
-     (non-blocking-io)
-     (non-blocking-io)
-     (non-blocking-io)
-     (non-blocking-io))
-   (time)
-   (catch #(clojure.pprint/pprint (ex-details %))))
