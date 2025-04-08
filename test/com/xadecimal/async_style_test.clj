@@ -140,23 +140,12 @@ cancelled."
            (is (= CancellationException (type (<<!! promise-chan))))))
 
   (testa "A value can be specified when cancelling, which is returned by the
-promise-chan of the async block instead of returning a CancellationException.
-Note that it is returned wrapped inside a reduced to indicate the short-circuiting."
+promise-chan of the async block instead of returning a CancellationException."
          (let [promise-chan (async (Thread/sleep 100)
                                    "I am cancelled")]
            (Thread/sleep 30)
            (cancel promise-chan "We had to cancel this.")
-           (is (reduced? (<<!! promise-chan)))
-           (is (= "We had to cancel this." @(<<!! promise-chan)))))
-
-  (testa "It will not wrap a given reduced in another reduced, effectively it
-behaves like ensure-reduced."
-         (let [promise-chan (async (Thread/sleep 100)
-                                   "I am cancelled")]
-           (Thread/sleep 30)
-           (cancel promise-chan (reduced "We had to cancel this."))
-           (is (reduced? (<<!! promise-chan)))
-           (is (= "We had to cancel this." @(<<!! promise-chan))))))
+           (is (= "We had to cancel this." (<<!! promise-chan))))))
 
 
 (deftest <<!-tests
@@ -471,15 +460,14 @@ cancelled async block returns a CancellationException."
          (is (= CancellationException (type (dq! 50)))))
 
   (testa "You can explicitly set a value when cancelling, and the cancelled async
-chan will return a (reduced value) of the value instead of throwing
-a CancellationException."
+chan will return that value instead of throwing a CancellationException."
          (let [work (async (loop [i 0]
                              (when-not (cancelled?)
                                (recur (inc i)))))]
            (Thread/sleep 5)
            (cancel work :had-to-cancel)
            (handle work q!))
-         (is (= :had-to-cancel (unreduced (dq!))))))
+         (is (= :had-to-cancel (dq!)))))
 
 
 (deftest blocking-tests
@@ -575,15 +563,14 @@ cancelled blocking block returns a CancellationException."
          (is (= CancellationException (type (dq! 50)))))
 
   (testa "You can explicitly set a value when cancelling, and the cancelled blocking
-chan will return a (reduced value) of the value instead of throwing
-a CancellationException."
+chan will return that value instead of throwing a CancellationException."
          (let [work (blocking (loop [i 0]
                                 (when-not (cancelled?)
                                   (recur (inc i)))))]
            (Thread/sleep 5)
            (cancel work :had-to-cancel)
            (handle work q!))
-         (is (= :had-to-cancel (unreduced (dq!))))))
+         (is (= :had-to-cancel (dq!)))))
 
 
 (deftest compute-tests
@@ -683,15 +670,14 @@ cancelled compute block returns a CancellationException."
          (is (= CancellationException (type (dq! 50)))))
 
   (testa "You can explicitly set a value when cancelling, and the cancelled compute
-chan will return a (reduced value) of the value instead of throwing
-a CancellationException."
+chan will return that value instead of throwing a CancellationException."
          (let [work (compute (loop [i 0]
                                (when-not (cancelled?)
                                  (recur (inc i)))))]
            (Thread/sleep 5)
            (cancel work :had-to-cancel)
            (handle work q!))
-         (is (= :had-to-cancel (unreduced (dq!))))))
+         (is (= :had-to-cancel (dq!)))))
 
 
 (deftest await-tests

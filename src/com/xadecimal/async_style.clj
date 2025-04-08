@@ -67,17 +67,17 @@
    as soon as they can, as it is no longer needed.
 
    The way cancellation is conveyed is by settling the return channel of async,
-   blocking and compute blocks to a CancellationException, unless passed a v explicitly, in which
-   case it will settle it with (reduced v).
+   blocking and compute blocks to a CancellationException, unless passed a v
+   explicitly, in which case it will settle it with v.
 
    That means by default a block that has its execution cancelled will return a
    CancellationException and thus awaiters and other takers of its result will
    see the exception and can handle it accordingly. If instead you want to cancel
-   the block so it returns a reduced value, pass in a v and the awaiters and
-   takers will receive that reduced value instead.
+   the block so it returns a value, pass in a v and the awaiters and
+   takers will receive that value instead.
 
-   It is up to processes inside async, blocking and compute
-   blocks to properly check for cancellation on a channel."
+   It is up to processes inside async, blocking and compute blocks to properly
+   check for cancellation on a channel."
   {:inline (fn
              ([chan] ` (com.xadecimal.async-style.impl/cancel ~chan))
              ([chan v] ` (com.xadecimal.async-style.impl/cancel ~chan ~v)))}
