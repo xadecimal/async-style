@@ -51,6 +51,7 @@
     :vars [#'impl/error?
            #'impl/ok?
            #'impl/cancelled?
+           #'impl/check-cancelled!
            #'impl/cancel
            #'impl/<<!
            #'impl/<<!!

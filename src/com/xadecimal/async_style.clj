@@ -44,11 +44,22 @@
    interrupted/short-circuited, false otherwise.
 
    Users are expected, when inside an execution block like async, blocking or
-   compute, to check using (cancelled?) as often as they can in case someone
+   compute, to check using (cancelled? or check-cancelled!) as often as they can in case someone
    tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   {:inline (fn ([] ` (com.xadecimal.async-style.impl/cancelled?)))}
   ([] (com.xadecimal.async-style.impl/cancelled?)))
+
+(defn check-cancelled!
+  "Throws if execution context was cancelled and thus should be
+   interrupted/short-circuited, returns nil.
+
+   Users are expected, when inside an execution block like async, blocking or
+   compute, to check using (cancelled? or check-cancelled!) as often as they can in case someone
+   tried to cancel their execution, in which case they should
+   interrupt/short-circuit the work as soon as they can."
+  {:inline (fn ([] ` (com.xadecimal.async-style.impl/check-cancelled!)))}
+  ([] (com.xadecimal.async-style.impl/check-cancelled!)))
 
 (defn cancel
   "When called on chan, tries to tell processes currently executing over the

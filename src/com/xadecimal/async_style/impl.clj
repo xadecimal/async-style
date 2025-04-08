@@ -9,8 +9,7 @@
 
 ;; TODO: add support for CSP style, maybe a process-factory that creates processes with ins/outs channels of buffer 1 and connectors between them
 ;; TODO: Add ClojureScript support
-;; TODO: Think if cancelled? should change so instead of returning true/false, it throws if cancelled
-;; TODO: Maybe wrapping in reduced when canceling isn't useful, and it should just return the value directly
+;; TODO: Maybe wrapping in reduced when cancelling isn't useful, and it should just return the value directly
 
 
 (def ^:private compute-pool
@@ -111,13 +110,26 @@ they should short-circuit as soon as they can.")
    interrupted/short-circuited, false otherwise.
 
    Users are expected, when inside an execution block like async, blocking or
-   compute, to check using (cancelled?) as often as they can in case someone
+   compute, to check using (cancelled? or check-cancelled!) as often as they can in case someone
    tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
   (if-let [v (a/poll! *cancellation-chan*)]
     (cancelled-val? v)
     false))
+
+(defn check-cancelled!
+  "Throws if execution context was cancelled and thus should be
+   interrupted/short-circuited, returns nil.
+
+   Users are expected, when inside an execution block like async, blocking or
+   compute, to check using (cancelled? or check-cancelled!) as often as they can in case someone
+   tried to cancel their execution, in which case they should
+   interrupt/short-circuit the work as soon as they can."
+  []
+  (when-let [v (a/poll! *cancellation-chan*)]
+    (when (cancelled-val? v)
+      (throw (CancellationException.)))))
 
 (defn cancel
   "When called on chan, tries to tell processes currently executing over the

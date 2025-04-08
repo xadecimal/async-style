@@ -34,11 +34,25 @@ error when returned by an async block, or any promise-chan."
   (testa "Async-style supports cancellation, you have to explicitly check for
 cancelled? inside your async blocks."
          (-> (async (loop [i 100 acc 0]
-                      (if (or (pos? i) (cancelled?))
+                      (if (and (pos? i) (not (cancelled?)))
                         (recur (dec i) (+ acc i))
                         acc)))
              (handle q!))
          (is (= 5050 (dq!))))
+
+  (testa "Here it is cancelling your loop."
+         (let [result (atom 0)
+               promise-chan (async (loop [i 100 acc 0]
+                                     (reset! result acc)
+                                     (Thread/sleep 1)
+                                     (if (and (pos? i) (not (cancelled?)))
+                                       (recur (dec i) (+ acc i))
+                                       acc)))]
+           (handle promise-chan q!)
+           (Thread/sleep 30)
+           (cancel promise-chan)
+           (is (instance? CancellationException (dq!)))
+           (is (> 5050 @result))))
 
   (testa "When used outside an async block, it throws."
          (is (thrown? IllegalArgumentException (cancelled?))))
@@ -53,6 +67,51 @@ cancelled? inside your async blocks."
   (testa "False otherwise."
          (async (q! (cancelled?)))
          (is (not (dq!)))))
+
+
+(deftest check-cancelled!-tests
+  (testa "Async-style supports cancellation, you have to explicitly check for
+it using check-cancelled! inside your async blocks."
+         (-> (async (loop [i 100 acc 0]
+                      (check-cancelled!)
+                      (if (pos? i)
+                        (recur (dec i) (+ acc i))
+                        acc)))
+             (handle q!))
+         (is (= 5050 (dq!))))
+
+  (testa "Here it is cancelling your loop."
+         (let [result (atom 0)
+               promise-chan (async (loop [i 100 acc 0]
+                                     (check-cancelled!)
+                                     (reset! result acc)
+                                     (Thread/sleep 1)
+                                     (if (pos? i)
+                                       (recur (dec i) (+ acc i))
+                                       acc)))]
+           (handle promise-chan q!)
+           (Thread/sleep 30)
+           (cancel promise-chan)
+           (is (instance? CancellationException (dq!)))
+           (is (> 5050 @result))))
+
+  (testa "When used outside an async block, it throws."
+         (is (thrown? IllegalArgumentException (check-cancelled!))))
+
+  (testa "Throws CancellationException if cancelled."
+         (let [promise-chan (async (Thread/sleep 60)
+                                   (check-cancelled!)
+                                   (catch CancellationException e
+                                     (q! e)))]
+           (Thread/sleep 30)
+           (cancel promise-chan))
+         (is (instance? CancellationException (dq!))))
+
+  (testa "Returns nil and doesn't throw otherwise."
+         (async (q! (check-cancelled!))
+                (catch CancellationException e
+                  (q! e)))
+         (is (nil? (dq!)))))
 
 
 (deftest cancel-tests
