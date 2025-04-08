@@ -5,7 +5,8 @@
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException TimeoutException]
-           [clojure.core.async.impl.channels ManyToManyChannel]))
+           [clojure.core.async.impl.channels ManyToManyChannel]
+           [clojure.lang ExceptionInfo]))
 
 
 (deftest error?-tests
@@ -145,7 +146,41 @@ promise-chan of the async block instead of returning a CancellationException."
                                    "I am cancelled")]
            (Thread/sleep 30)
            (cancel promise-chan "We had to cancel this.")
-           (is (= "We had to cancel this." (<<!! promise-chan))))))
+           (is (= "We had to cancel this." (<<!! promise-chan)))))
+
+  (testa "Any value can be set as the cancelled val."
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan 123)
+           (is (= 123 (wait promise-chan))))
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan :foo)
+           (is (= :foo (wait promise-chan))))
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan "cool")
+           (is (= "cool" (wait promise-chan))))
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan {:complex true})
+           (is (= {:complex true} (wait promise-chan))))
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan (ex-info "Even exceptions" {:error true}))
+           (is (thrown? ExceptionInfo (wait promise-chan)))))
+
+  (testa "Except for nil, since nil is ambiguous between has the chan been
+cancelled or is there just nothing to poll!, so if you try to cancel with nil
+it throws."
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (is (thrown-with-msg? IllegalArgumentException #"Can't put nil .*"
+                                 (cancel promise-chan nil)))
+           (is (= "Not cancelled" (wait promise-chan)))))
+
+  (testa "So just like in core.async, you need to use something else to represent
+nil in that case, like :nil or (reduced nil)"
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan :nil)
+           (is (= :nil (wait promise-chan))))
+         (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
+           (cancel promise-chan (reduced nil))
+           (is (nil? @(wait promise-chan))))))
 
 
 (deftest <<!-tests

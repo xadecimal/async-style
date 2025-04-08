@@ -141,7 +141,8 @@ they should short-circuit as soon as they can.")
    CancellationException and thus awaiters and other takers of its result will
    see the exception and can handle it accordingly. If instead you want to cancel
    the block so it returns a value, pass in a v and the awaiters and
-   takers will receive that value instead.
+   takers will receive that value instead. You can't set nil as the cancelled
+   value, attempting to do so will throw an IllegalArgumentException.
 
    It is up to processes inside async, blocking and compute blocks to properly
    check for cancellation on a channel."
@@ -149,6 +150,8 @@ they should short-circuit as soon as they can.")
    (when (chan? chan)
      (settle chan (CancellationException. "Operation was cancelled."))))
   ([chan v]
+   (when (nil? v)
+     (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
    (when (chan? chan)
      (settle chan v))))
 
