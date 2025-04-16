@@ -53,10 +53,8 @@
            #'impl/cancelled?
            #'impl/check-cancelled!
            #'impl/cancel!
-           #_#'impl/<<!
-           #_#'impl/<<!!
-           #_#'impl/<<?
-           #_#'impl/<<??
+           #_#'impl/await*
+           #_#'impl/wait*
            #'impl/async
            #'impl/blocking
            #'impl/compute

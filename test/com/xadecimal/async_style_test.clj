@@ -2,7 +2,7 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is]]
             [com.xadecimal.async-style :as a :refer :all]
-            [com.xadecimal.async-style.impl :refer [error? ok? <<! <<!! <<? <<??]]
+            [com.xadecimal.async-style.impl :refer [error? ok? await* wait* <<? <<??]]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException TimeoutException]
@@ -124,14 +124,14 @@ points in time and short-circuit/interrupt, or cancel! will not be able to
 actually cancel."
          (let [promise-chan (async "I am cancelled")]
            (cancel! promise-chan)
-           (is (= CancellationException (type (<<!! promise-chan))))))
+           (is (= CancellationException (type (wait* promise-chan))))))
 
   (testa "If the block has started executing, it won't cancel without explicit
 cancellation? check."
          (let [promise-chan (async "I am not cancelled")]
            (Thread/sleep 30)
            (cancel! promise-chan)
-           (is (= "I am not cancelled" (<<!! promise-chan)))))
+           (is (= "I am not cancelled" (wait* promise-chan)))))
 
   (testa "If the block checks for cancellation explicitly, it can still be
 cancelled."
@@ -139,7 +139,7 @@ cancelled."
                                    "I am cancelled")]
            (Thread/sleep 30)
            (cancel! promise-chan)
-           (is (= CancellationException (type (<<!! promise-chan))))))
+           (is (= CancellationException (type (wait* promise-chan))))))
 
   (testa "A value can be specified when cancelling, which is returned by the
 promise-chan of the async block instead of returning a CancellationException."
@@ -147,7 +147,7 @@ promise-chan of the async block instead of returning a CancellationException."
                                    "I am cancelled")]
            (Thread/sleep 30)
            (cancel! promise-chan "We had to cancel this.")
-           (is (= "We had to cancel this." (<<!! promise-chan)))))
+           (is (= "We had to cancel this." (wait* promise-chan)))))
 
   (testa "Any value can be set as the cancelled val."
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
@@ -187,7 +187,7 @@ nil in that case, like :nil or (reduced nil)"
 (deftest <<!-tests
   (testa "Takes a value from a chan."
          (async
-           (q! (<<! (async "Hello!"))))
+           (q! (await* (async "Hello!"))))
          (is (= "Hello!" (dq!))))
 
   (testa "Parks if none are available yet, resumes only once a value is available."
@@ -195,7 +195,7 @@ nil in that case, like :nil or (reduced nil)"
            (let [pc (async (Thread/sleep 100)
                            "This will only have a value after 100ms")]
              (q! (System/currentTimeMillis))
-             (q! (<<! pc))
+             (q! (await* pc))
              (q! (System/currentTimeMillis))))
          (let [before-time (dq!)
                ret (dq!)
@@ -204,14 +204,14 @@ nil in that case, like :nil or (reduced nil)"
            (is (= "This will only have a value after 100ms" ret))))
 
   (testa "Throws if used outside an async block"
-         (is (thrown? AssertionError (<<! (async)))))
+         (is (thrown? AssertionError (await* (async)))))
 
   (testa "Works on values as well, will just return it immediately."
-         (async (q! (<<! :a-value))
-                (q! (<<! 1))
-                (q! (<<! ["a" "b"]))
+         (async (q! (await* :a-value))
+                (q! (await* 1))
+                (q! (await* ["a" "b"]))
                 (q! (System/currentTimeMillis))
-                (q! (<<! :a-value))
+                (q! (await* :a-value))
                 (q! (System/currentTimeMillis)))
          (is (= :a-value (dq!)))
          (is (= 1 (dq!)))
@@ -224,52 +224,52 @@ nil in that case, like :nil or (reduced nil)"
   (testa "If an exception is returned by chan, it will return the exception,
 it won't throw."
          (async
-           (q! (<<! (async (/ 1 0)))))
+           (q! (await* (async (/ 1 0)))))
          (is (= ArithmeticException (type (dq!)))))
 
   (testa "Taken value will be fully joined. That means if the value taken is
 itself a chan, <<! will also take from it, until it eventually takes a non chan
 value."
          (async
-           (q! (<<! (async (async (async 1))))))
+           (q! (await* (async (async (async 1))))))
          (is (= 1 (dq!)))))
 
 
 (deftest <<!!-tests
   (testa "Takes a value from a chan."
-         (is (= "Hello!" (<<!! (async "Hello!")))))
+         (is (= "Hello!" (wait* (async "Hello!")))))
 
   (testa "Blocks if none are available yet, resumes only once a value is available."
          (let [pc (async (Thread/sleep 100)
                          "This will only have a value after 100ms")
                before-time (System/currentTimeMillis)
-               ret (<<!! pc)
+               ret (wait* pc)
                after-time (System/currentTimeMillis)]
            (is (>= (- after-time before-time) 100))
            (is (= "This will only have a value after 100ms" ret))))
 
   (testa "Should not be used inside an async block, since it will block instead
 of parking."
-         (async (q! (<<!! (async "Don't do this even though it works."))))
+         (async (q! (wait* (async "Don't do this even though it works."))))
          (is (= "Don't do this even though it works." (dq!))))
 
   (testa "Works on values as well, will just return it immediately."
-         (is (= :a-value (<<!! :a-value)))
-         (is (= 1 (<<!! 1)))
-         (is (= ["a" "b"] (<<!! ["a" "b"])))
+         (is (= :a-value (wait* :a-value)))
+         (is (= 1 (wait* 1)))
+         (is (= ["a" "b"] (wait* ["a" "b"])))
          (let [before-time (System/currentTimeMillis)
-               _ (<<!! :a-value)
+               _ (wait* :a-value)
                after-time (System/currentTimeMillis)]
            (is (<= (- after-time before-time) 1))))
 
   (testa "If an exception is returned by chan, it will return the exception,
 it won't throw."
-         (is (= ArithmeticException (type (<<!! (async (/ 1 0)))))))
+         (is (= ArithmeticException (type (wait* (async (/ 1 0)))))))
 
   (testa "Taken value will be fully joined. That means if the value taken is
 itself a chan, <<!! will also take from it, until it eventually takes a non chan
 value."
-         (is (= 1 (<<!! (async (async (async 1))))))))
+         (is (= 1 (wait* (async (async (async 1))))))))
 
 
 (deftest <<?-tests
@@ -871,11 +871,11 @@ error handler if the error is of that type."
          (-> (async (/ 1 0))
              (catch ArithmeticException (fn [_e] 10))
              (handle q!)
-             (<<!!))
+             (wait*))
          (-> (async (/ 1 0))
              (catch IllegalStateException (fn [_e] 10))
              (handle q!)
-             (<<!!))
+             (wait*))
          (is (= 10 (dq!)))
          (is (not= 10 (dq!))))
   (testa "So you can chain it to handle different type of errors in different
@@ -889,11 +889,11 @@ ways."
          (-> (async (throw (ex-info "An error" {:type :foo})))
              (catch (fn [e] (= :foo (-> e ex-data :type))) (fn [_e] 10))
              (handle q!)
-             (<<!!))
+             (wait*))
          (-> (async (throw (ex-info "An error" {:type :foo})))
              (catch (fn [e] (= :bar (-> e ex-data :type))) (fn [_e] 10))
              (handle q!)
-             (<<!!))
+             (wait*))
          (is (= 10 (dq!)))
          (is (not= 10 (dq!)))))
 

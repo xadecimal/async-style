@@ -261,13 +261,13 @@ they should short-circuit as soon as they can.")
                              ~chan-or-value-gensym)]
        value-or-error#)))
 
-(defmacro <<!
+(defmacro await*
   "Parking takes from chan-or-value so that any exception is returned, and with
    taken result fully joined."
   [chan-or-value]
   (<<!' chan-or-value))
 
-(defn <<!!
+(defn wait*
   "Blocking takes from chan-or-value so that any exception is returned, and with
    taken result fully joined."
   [chan-or-value]
@@ -283,7 +283,7 @@ they should short-circuit as soon as they can.")
    result, else if value it returns value directly, or if chan-or-value throws it
    re-throws exception."
   [chan-or-value]
-  `(let [value-or-error# (<<! ~chan-or-value)]
+  `(let [value-or-error# (await* ~chan-or-value)]
      (if (error? value-or-error#)
        (throw value-or-error#)
        value-or-error#)))
@@ -308,7 +308,7 @@ they should short-circuit as soon as they can.")
    result, else if value it returns value directly, or if chan-or-value throws it
    re-throws exception."
   [chan-or-value]
-  `(let [value-or-error# (<<!! ~chan-or-value)]
+  `(let [value-or-error# (wait* ~chan-or-value)]
      (if (error? value-or-error#)
        (throw value-or-error#)
        value-or-error#)))
@@ -370,13 +370,13 @@ they should short-circuit as soon as they can.")
    respectively."
   ([chan error-handler]
    (async
-     (let [v (<<! chan)]
+     (let [v (await* chan)]
        (if (error? v)
          (error-handler v)
          v))))
   ([chan pred-or-type error-handler]
    (async
-     (let [v (<<! chan)]
+     (let [v (await* chan)]
        (if (error? v)
          (cond (and (class? pred-or-type) (instance? pred-or-type v))
                (error-handler v)
@@ -396,7 +396,7 @@ they should short-circuit as soon as they can.")
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
   (async
-    (let [res (<<! chan)]
+    (let [res (await* chan)]
       (f res)
       res)))
 
@@ -410,7 +410,7 @@ they should short-circuit as soon as they can.")
    compute heavy, remember to wrap it in a blocking or compute respectively."
   [chan f]
   (async
-    (let [v (<<! chan)]
+    (let [v (await* chan)]
       (if (error? v)
         v
         (f v)))))
@@ -442,11 +442,11 @@ they should short-circuit as soon as they can.")
    blocking or compute respectively."
   ([chan f]
    (async
-     (let [v (<<! chan)]
+     (let [v (await* chan)]
        (f v))))
   ([chan ok-handler error-handler]
    (async
-     (let [v (<<! chan)]
+     (let [v (await* chan)]
        (if (error? v)
          (error-handler v)
          (ok-handler v))))))
@@ -510,7 +510,7 @@ they should short-circuit as soon as they can.")
     (if (seq chans)
       (doseq [chan chans]
         (a/go
-          (let [res (<<! chan)]
+          (let [res (await* chan)]
             (and (settle! ret res)
                  (run! #(when-not (= chan %) (cancel! %)) chans)))))
       (settle! ret nil))
@@ -537,7 +537,7 @@ they should short-circuit as soon as they can.")
           (vswap! attempt-chans
                   conj
                   (a/go
-                    (let [v (<<! chan)]
+                    (let [v (await* chan)]
                       (if (error? v)
                         v
                         (and (settle! ret v)
@@ -569,7 +569,7 @@ they should short-circuit as soon as they can.")
   (async
     (loop [res [] chan (first chans) chans (next chans)]
       (if chan
-        (recur (conj res (<<! chan))
+        (recur (conj res (await* chan))
                (first chans)
                (next chans))
         res))))
@@ -591,7 +591,7 @@ they should short-circuit as soon as they can.")
           (vswap! res-chans
                   conj
                   (a/go
-                    (let [v (<<! chan)]
+                    (let [v (await* chan)]
                       (if (error? v)
                         (do (and (settle! ret v)
                                  (run! #(when-not (= chan %) (cancel! %)) chans))
