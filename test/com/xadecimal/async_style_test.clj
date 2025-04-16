@@ -52,7 +52,7 @@ cancelled? inside your async blocks."
                                        acc)))]
            (handle promise-chan q!)
            (Thread/sleep 30)
-           (cancel promise-chan)
+           (cancel! promise-chan)
            (is (instance? CancellationException (dq!)))
            (is (> 5050 @result))))
 
@@ -63,7 +63,7 @@ cancelled? inside your async blocks."
          (let [promise-chan (async (Thread/sleep 60)
                                    (q! (cancelled?)))]
            (Thread/sleep 30)
-           (cancel promise-chan))
+           (cancel! promise-chan))
          (is (dq!)))
 
   (testa "False otherwise."
@@ -93,7 +93,7 @@ it using check-cancelled! inside your async blocks."
                                        acc)))]
            (handle promise-chan q!)
            (Thread/sleep 30)
-           (cancel promise-chan)
+           (cancel! promise-chan)
            (is (instance? CancellationException (dq!)))
            (is (> 5050 @result))))
 
@@ -106,7 +106,7 @@ it using check-cancelled! inside your async blocks."
                                    (catch CancellationException e
                                      (q! e)))]
            (Thread/sleep 30)
-           (cancel promise-chan))
+           (cancel! promise-chan))
          (is (instance? CancellationException (dq!))))
 
   (testa "Returns nil and doesn't throw otherwise."
@@ -116,21 +116,21 @@ it using check-cancelled! inside your async blocks."
          (is (nil? (dq!)))))
 
 
-(deftest cancel-tests
-  (testa "You can use cancel to cancel an async block, this is best effort.
+(deftest cancel!-tests
+  (testa "You can use cancel! to cancel an async block, this is best effort.
 If the block has not started executing yet, it will cancel, otherwise it
 needs to be the async block explicitly checks for cancelled? at certain
-points in time and short-circuit/interrupt, or cancel will not be able to
+points in time and short-circuit/interrupt, or cancel! will not be able to
 actually cancel."
          (let [promise-chan (async "I am cancelled")]
-           (cancel promise-chan)
+           (cancel! promise-chan)
            (is (= CancellationException (type (<<!! promise-chan))))))
 
   (testa "If the block has started executing, it won't cancel without explicit
 cancellation? check."
          (let [promise-chan (async "I am not cancelled")]
            (Thread/sleep 30)
-           (cancel promise-chan)
+           (cancel! promise-chan)
            (is (= "I am not cancelled" (<<!! promise-chan)))))
 
   (testa "If the block checks for cancellation explicitly, it can still be
@@ -138,7 +138,7 @@ cancelled."
          (let [promise-chan (async (Thread/sleep 100)
                                    "I am cancelled")]
            (Thread/sleep 30)
-           (cancel promise-chan)
+           (cancel! promise-chan)
            (is (= CancellationException (type (<<!! promise-chan))))))
 
   (testa "A value can be specified when cancelling, which is returned by the
@@ -146,41 +146,41 @@ promise-chan of the async block instead of returning a CancellationException."
          (let [promise-chan (async (Thread/sleep 100)
                                    "I am cancelled")]
            (Thread/sleep 30)
-           (cancel promise-chan "We had to cancel this.")
+           (cancel! promise-chan "We had to cancel this.")
            (is (= "We had to cancel this." (<<!! promise-chan)))))
 
   (testa "Any value can be set as the cancelled val."
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan 123)
+           (cancel! promise-chan 123)
            (is (= 123 (wait promise-chan))))
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan :foo)
+           (cancel! promise-chan :foo)
            (is (= :foo (wait promise-chan))))
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan "cool")
+           (cancel! promise-chan "cool")
            (is (= "cool" (wait promise-chan))))
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan {:complex true})
+           (cancel! promise-chan {:complex true})
            (is (= {:complex true} (wait promise-chan))))
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan (ex-info "Even exceptions" {:error true}))
+           (cancel! promise-chan (ex-info "Even exceptions" {:error true}))
            (is (thrown? ExceptionInfo (wait promise-chan)))))
 
   (testa "Except for nil, since nil is ambiguous between has the chan been
-cancelled or is there just nothing to poll!, so if you try to cancel with nil
+cancelled or is there just nothing to poll!, so if you try to cancel! with nil
 it throws."
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
            (is (thrown-with-msg? IllegalArgumentException #"Can't put nil .*"
-                                 (cancel promise-chan nil)))
+                                 (cancel! promise-chan nil)))
            (is (= "Not cancelled" (wait promise-chan)))))
 
   (testa "So just like in core.async, you need to use something else to represent
 nil in that case, like :nil or (reduced nil)"
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan :nil)
+           (cancel! promise-chan :nil)
            (is (= :nil (wait promise-chan))))
          (let [promise-chan (blocking (Thread/sleep 100) "Not cancelled")]
-           (cancel promise-chan (reduced nil))
+           (cancel! promise-chan (reduced nil))
            (is (nil? @(wait promise-chan))))))
 
 
@@ -481,7 +481,7 @@ with try/catch/finally. It's similar to if you always wrapped the inside in a tr
 
   (testa "Async block can be cancelled, they will skip their execution if cancelled
 before they begin executing."
-         (cancel (async (q! :will-timeout-due-to-cancel)))
+         (cancel! (async (q! :will-timeout-due-to-cancel)))
          (is (= :timeout (dq!))))
 
   (testa "If you plan on doing lots of work, and want to support it being cancellable,
@@ -491,7 +491,7 @@ cancelled async block returns a CancellationException."
                              (when-not (cancelled?)
                                (recur (inc i)))))]
            (Thread/sleep 5)
-           (cancel work)
+           (cancel! work)
            (handle work q!))
          (is (= CancellationException (type (dq! 50)))))
 
@@ -501,7 +501,7 @@ chan will return that value instead of throwing a CancellationException."
                              (when-not (cancelled?)
                                (recur (inc i)))))]
            (Thread/sleep 5)
-           (cancel work :had-to-cancel)
+           (cancel! work :had-to-cancel)
            (handle work q!))
          (is (= :had-to-cancel (dq!)))))
 
@@ -584,7 +584,7 @@ with try/catch/finally. It's similar to if you always wrapped the inside in a tr
 
   (testa "Blocking block can be cancelled, they will skip their execution if cancelled
 before they begin executing."
-         (cancel (blocking (q! :will-timeout-due-to-cancel)))
+         (cancel! (blocking (q! :will-timeout-due-to-cancel)))
          (is (= :timeout (dq!))))
 
   (testa "If you plan on doing lots of work, and want to support it being cancellable,
@@ -594,7 +594,7 @@ cancelled blocking block returns a CancellationException."
                                 (when-not (cancelled?)
                                   (recur (inc i)))))]
            (Thread/sleep 5)
-           (cancel work)
+           (cancel! work)
            (handle work q!))
          (is (= CancellationException (type (dq! 50)))))
 
@@ -604,7 +604,7 @@ chan will return that value instead of throwing a CancellationException."
                                 (when-not (cancelled?)
                                   (recur (inc i)))))]
            (Thread/sleep 5)
-           (cancel work :had-to-cancel)
+           (cancel! work :had-to-cancel)
            (handle work q!))
          (is (= :had-to-cancel (dq!)))))
 
@@ -691,7 +691,7 @@ with try/catch/finally. It's similar to if you always wrapped the inside in a tr
 
   (testa "Compute block can be cancelled, they will skip their execution if cancelled
 before they begin executing."
-         (cancel (compute (q! :will-timeout-due-to-cancel)))
+         (cancel! (compute (q! :will-timeout-due-to-cancel)))
          (is (= :timeout (dq!))))
 
   (testa "If you plan on doing lots of work, and want to support it being cancellable,
@@ -701,7 +701,7 @@ cancelled compute block returns a CancellationException."
                                (when-not (cancelled?)
                                  (recur (inc i)))))]
            (Thread/sleep 5)
-           (cancel work)
+           (cancel! work)
            (handle work q!))
          (is (= CancellationException (type (dq! 50)))))
 
@@ -711,7 +711,7 @@ chan will return that value instead of throwing a CancellationException."
                                (when-not (cancelled?)
                                  (recur (inc i)))))]
            (Thread/sleep 5)
-           (cancel work :had-to-cancel)
+           (cancel! work :had-to-cancel)
            (handle work q!))
          (is (= :had-to-cancel (dq!)))))
 

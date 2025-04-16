@@ -45,7 +45,7 @@
   {:inline (fn ([] ` (com.xadecimal.async-style.impl/check-cancelled!)))}
   ([] (com.xadecimal.async-style.impl/check-cancelled!)))
 
-(defn cancel
+(defn cancel!
   "When called on chan, tries to tell processes currently executing over the
    chan that they should interrupt and short-circuit (aka cancel) their execution
    as soon as they can, as it is no longer needed.
@@ -64,10 +64,10 @@
    It is up to processes inside async, blocking and compute blocks to properly
    check for cancellation on a channel."
   {:inline (fn
-             ([chan] ` (com.xadecimal.async-style.impl/cancel ~chan))
-             ([chan v] ` (com.xadecimal.async-style.impl/cancel ~chan ~v)))}
-  ([chan] (com.xadecimal.async-style.impl/cancel chan))
-  ([chan v] (com.xadecimal.async-style.impl/cancel chan v)))
+             ([chan] ` (com.xadecimal.async-style.impl/cancel! ~chan))
+             ([chan v] ` (com.xadecimal.async-style.impl/cancel! ~chan ~v)))}
+  ([chan] (com.xadecimal.async-style.impl/cancel! chan))
+  ([chan v] (com.xadecimal.async-style.impl/cancel! chan v)))
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,

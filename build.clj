@@ -52,7 +52,7 @@
            #_#'impl/ok?
            #'impl/cancelled?
            #'impl/check-cancelled!
-           #'impl/cancel
+           #'impl/cancel!
            #_#'impl/<<!
            #_#'impl/<<!!
            #_#'impl/<<?

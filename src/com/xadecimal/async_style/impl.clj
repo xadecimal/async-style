@@ -9,6 +9,10 @@
 
 ;; TODO: add support for CSP style, maybe a process-factory that creates processes with ins/outs channels of buffer 1 and connectors between them
 ;; TODO: Add ClojureScript support
+;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
+;; TODO: Consider supporting await for... like in Python or JS
+;; TODO: Delete the code for <<?? and <<? since it seems nothing uses it.
+;; TODO: Consider renaming <<! and <<!! as safe-await and safe-wait, or wait* await* or wait' and await'
 
 
 (def ^:private compute-pool
@@ -51,7 +55,7 @@
               ~@(when finally
                   [finally]))]))))
 
-(defn- settle
+(defn- settle!
   "Puts v into chan if it is possible to do so immediately (uses offer!) and
    closes chan. If v is nil it will just close chan. Returns true if offer! of v
    in chan succeeded or v was nil, false otherwise."
@@ -128,7 +132,7 @@ they should short-circuit as soon as they can.")
     (when (cancelled-val? v)
       (throw (CancellationException.)))))
 
-(defn cancel
+(defn cancel!
   "When called on chan, tries to tell processes currently executing over the
    chan that they should interrupt and short-circuit (aka cancel) their execution
    as soon as they can, as it is no longer needed.
@@ -148,12 +152,12 @@ they should short-circuit as soon as they can.")
    check for cancellation on a channel."
   ([chan]
    (when (chan? chan)
-     (settle chan (CancellationException. "Operation was cancelled."))))
+     (settle! chan (CancellationException. "Operation was cancelled."))))
   ([chan v]
    (when (nil? v)
      (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
    (when (chan? chan)
-     (settle chan v))))
+     (settle! chan v))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -186,7 +190,7 @@ they should short-circuit as soon as they can.")
    support for cancellation, implicit-try, and returning a promise-chan settled
    with the result or any exception thrown."
   [body execution-type]
-  (let [settle- settle]
+  (let [settle- settle!]
     `(let [ret# (a/promise-chan)]
        (~(case execution-type
            :blocking `a/thread
@@ -484,12 +488,12 @@ they should short-circuit as soon as they can.")
                 res (first (a/alts! [chan deferred]))]
             (cond (= ::timed-out res)
                   (do
-                    (cancel chan)
+                    (cancel! chan)
                     (if (fn? timed-out-value-or-fn)
                       (timed-out-value-or-fn)
                       timed-out-value-or-fn))
                   :else
-                  (do (cancel deferred)
+                  (do (cancel! deferred)
                       res))))))
 
 (defn race
@@ -507,9 +511,9 @@ they should short-circuit as soon as they can.")
       (doseq [chan chans]
         (a/go
           (let [res (<<! chan)]
-            (and (settle ret res)
-                 (run! #(when-not (= chan %) (cancel %)) chans)))))
-      (settle ret nil))
+            (and (settle! ret res)
+                 (run! #(when-not (= chan %) (cancel! %)) chans)))))
+      (settle! ret nil))
     ret))
 
 (defn any
@@ -536,17 +540,17 @@ they should short-circuit as soon as they can.")
                     (let [v (<<! chan)]
                       (if (error? v)
                         v
-                        (and (settle ret v)
-                             (run! #(when-not (= chan %) (cancel %)) chans)))))))
+                        (and (settle! ret v)
+                             (run! #(when-not (= chan %) (cancel! %)) chans)))))))
         (a/go
           (let [errors (a/<! (a/map vector @attempt-chans))]
             (when (every? error? errors)
-              (settle ret (ex-info
-                           "All chans returned errors"
-                           {:block :any
-                            :errors errors
-                            :type :all-errored}))))))
-      (settle ret nil))
+              (settle! ret (ex-info
+                            "All chans returned errors"
+                            {:block :any
+                             :errors errors
+                             :type :all-errored}))))))
+      (settle! ret nil))
     ret))
 
 (defn all-settled
@@ -589,14 +593,14 @@ they should short-circuit as soon as they can.")
                   (a/go
                     (let [v (<<! chan)]
                       (if (error? v)
-                        (do (and (settle ret v)
-                                 (run! #(when-not (= chan %) (cancel %)) chans))
+                        (do (and (settle! ret v)
+                                 (run! #(when-not (= chan %) (cancel! %)) chans))
                             v)
                         v)))))
         (a/go
           (let [results (a/<! (a/map vector @res-chans))]
             (when-not (some error? results)
-              (settle ret results)))))
+              (settle! ret results)))))
       (a/close! ret))
     ret))
 
