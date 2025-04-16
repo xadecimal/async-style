@@ -2,7 +2,7 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is]]
             [com.xadecimal.async-style :as a :refer :all]
-            [com.xadecimal.async-style.impl :refer [error? ok? await* wait* <<? <<??]]
+            [com.xadecimal.async-style.impl :refer [error? ok? await* wait*]]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException TimeoutException]
@@ -275,7 +275,7 @@ value."
 (deftest <<?-tests
   (testa "Takes a value from a chan."
          (async
-           (q! (<<? (async "Hello!"))))
+           (q! (await (async "Hello!"))))
          (is (= "Hello!" (dq!))))
 
   (testa "Parks if none are available yet, resumes only once a value is available."
@@ -283,7 +283,7 @@ value."
            (let [pc (async (Thread/sleep 100)
                            "This will only have a value after 100ms")]
              (q! (System/currentTimeMillis))
-             (q! (<<? pc))
+             (q! (await pc))
              (q! (System/currentTimeMillis))))
          (let [before-time (dq!)
                ret (dq!)
@@ -292,14 +292,14 @@ value."
            (is (= "This will only have a value after 100ms" ret))))
 
   (testa "Throws if used outside an async block"
-         (is (thrown? AssertionError (<<? (async)))))
+         (is (thrown? AssertionError (await (async)))))
 
   (testa "Works on values as well, will just return it immediately."
-         (async (q! (<<? :a-value))
-                (q! (<<? 1))
-                (q! (<<? ["a" "b"]))
+         (async (q! (await :a-value))
+                (q! (await 1))
+                (q! (await ["a" "b"]))
                 (q! (System/currentTimeMillis))
-                (q! (<<? :a-value))
+                (q! (await :a-value))
                 (q! (System/currentTimeMillis)))
          (is (= :a-value (dq!)))
          (is (= 1 (dq!)))
@@ -311,53 +311,53 @@ value."
 
   (testa "If an exception is returned by chan, it will re-throw the exception."
          (async (try
-                  (<<? (async (/ 1 0)))
+                  (await (async (/ 1 0)))
                   (catch ArithmeticException _
                     (q! :thrown))))
          (is (= :thrown (dq!))))
 
   (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, <<? will also take from it, until it eventually takes a non chan
+itself a chan, await will also take from it, until it eventually takes a non chan
 value."
          (async
-           (q! (<<? (async (async (async 1))))))
+           (q! (await (async (async (async 1))))))
          (is (= 1 (dq!)))))
 
 
 (deftest <<??-tests
   (testa "Takes a value from a chan."
-         (is (= "Hello!" (<<?? (async "Hello!")))))
+         (is (= "Hello!" (wait (async "Hello!")))))
 
   (testa "Blocks if none are available yet, resumes only once a value is available."
          (let [pc (async (Thread/sleep 100)
                          "This will only have a value after 100ms")
                before-time (System/currentTimeMillis)
-               ret (<<?? pc)
+               ret (wait pc)
                after-time (System/currentTimeMillis)]
            (is (>= (- after-time before-time) 100))
            (is (= "This will only have a value after 100ms" ret))))
 
   (testa "Should not be used inside an async block, since it will block instead
 of parking."
-         (async (q! (<<?? (async "Don't do this even though it works."))))
+         (async (q! (wait (async "Don't do this even though it works."))))
          (is (= "Don't do this even though it works." (dq!))))
 
   (testa "Works on values as well, will just return it immediately."
-         (is (= :a-value (<<?? :a-value)))
-         (is (= 1 (<<?? 1)))
-         (is (= ["a" "b"] (<<?? ["a" "b"])))
+         (is (= :a-value (wait :a-value)))
+         (is (= 1 (wait 1)))
+         (is (= ["a" "b"] (wait ["a" "b"])))
          (let [before-time (System/currentTimeMillis)
-               _ (<<?? :a-value)
+               _ (wait :a-value)
                after-time (System/currentTimeMillis)]
            (is (<= (- after-time before-time) 1))))
 
   (testa "If an exception is returned by chan, it will re-throw the exception."
-         (is (thrown? ArithmeticException (<<?? (async (/ 1 0))))))
+         (is (thrown? ArithmeticException (wait (async (/ 1 0))))))
 
   (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, <<?? will also take from it, until it eventually takes a non chan
+itself a chan, wait will also take from it, until it eventually takes a non chan
 value."
-         (is (= 1 (<<?? (async (async (async 1))))))))
+         (is (= 1 (wait (async (async (async 1))))))))
 
 
 (deftest wait-tests
@@ -1092,7 +1092,7 @@ choosing on timeout instead."
                (doall
                 (for [i (range 3000)]
                   (-> (race [1 2 3 4 5 6 7 8 9 (async 10)])
-                      (<<??))))))))
+                      (wait))))))))
 
   (testa "Race cancels all other chans once one of them fulfills."
          (-> (race [(blocking
@@ -1181,7 +1181,7 @@ choosing on timeout instead."
                (doall
                 (for [i (range 3000)]
                   (-> (any [1 2 3 4 5 6 7 8 9 (async 10)])
-                      (<<??))))))))
+                      (wait))))))))
 
   (testa "Any cancels all other chans once one of them fulfills in ok?."
          (-> (any [(blocking
@@ -1277,7 +1277,7 @@ choosing on timeout instead."
            (doall
             (for [i (range 3000)]
               (-> (all-settled [1 (async 2) 3 (async 4) (async 5) 6 (async 7) 8 9 (async 10)])
-                  (<<??))))))))
+                  (wait))))))))
 
 
 (deftest all-tests

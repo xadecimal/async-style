@@ -288,21 +288,6 @@ they should short-circuit as soon as they can.")
        (throw value-or-error#)
        value-or-error#)))
 
-(defmacro <<?
-  "Parking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined. Supports implicit-try to handle thrown
-   exceptions such as:
-
-   (async
-     (<<? (async (/ 1 0))
-          (catch ArithmeticException e
-            (println e))
-          (catch Exception e
-            (println \"Other unexpected excpetion\"))
-          (finally (println \"done\"))))"
-  [chan-or-value & body]
-  (first (implicit-try (cons (<<?' chan-or-value) body))))
-
 (defn- <<??'
   "Wraps chan-or-value so that if chan it joins from it returning the joined
    result, else if value it returns value directly, or if chan-or-value throws it
@@ -312,20 +297,6 @@ they should short-circuit as soon as they can.")
      (if (error? value-or-error#)
        (throw value-or-error#)
        value-or-error#)))
-
-(defmacro <<??
-  "Blocking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined. Supports implicit-try to handle thrown
-   exceptions such as:
-
-   (<<? (async (/ 1 0))
-          (catch ArithmeticException e
-            (println e))
-          (catch Exception e
-            (println \"Other unexpected excpetion\"))
-          (finally (println \"done\")))"
-  [chan-or-value & body]
-  (first (implicit-try (cons (<<??' chan-or-value) body))))
 
 (defmacro await
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
