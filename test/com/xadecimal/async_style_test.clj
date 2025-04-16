@@ -2,6 +2,7 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is]]
             [com.xadecimal.async-style :as a :refer :all]
+            [com.xadecimal.async-style.impl :refer [error? ok? <<! <<!! <<? <<??]]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException TimeoutException]
@@ -862,17 +863,17 @@ things in inner functions."
 it calls the provided error handler with the error, and instead return what that
 returns."
          (-> (async (/ 1 0))
-             (a/catch (fn [_e] 10))
+             (catch (fn [_e] 10))
              (handle q!))
          (is (= 10 (dq!))))
   (testa "You can provide a type to filter the error on, it will only call the
 error handler if the error is of that type."
          (-> (async (/ 1 0))
-             (a/catch ArithmeticException (fn [_e] 10))
+             (catch ArithmeticException (fn [_e] 10))
              (handle q!)
              (<<!!))
          (-> (async (/ 1 0))
-             (a/catch IllegalStateException (fn [_e] 10))
+             (catch IllegalStateException (fn [_e] 10))
              (handle q!)
              (<<!!))
          (is (= 10 (dq!)))
@@ -880,17 +881,17 @@ error handler if the error is of that type."
   (testa "So you can chain it to handle different type of errors in different
 ways."
          (-> (async (/ 1 0))
-             (a/catch IllegalStateException (fn [_e] 1))
-             (a/catch ArithmeticException (fn [_e] 2))
+             (catch IllegalStateException (fn [_e] 1))
+             (catch ArithmeticException (fn [_e] 2))
              (handle q!))
          (is (= 2 (dq!))))
   (testa "You can provide a predicate instead as well, to filter on the error."
          (-> (async (throw (ex-info "An error" {:type :foo})))
-             (a/catch (fn [e] (= :foo (-> e ex-data :type))) (fn [_e] 10))
+             (catch (fn [e] (= :foo (-> e ex-data :type))) (fn [_e] 10))
              (handle q!)
              (<<!!))
          (-> (async (throw (ex-info "An error" {:type :foo})))
-             (a/catch (fn [e] (= :bar (-> e ex-data :type))) (fn [_e] 10))
+             (catch (fn [e] (= :bar (-> e ex-data :type))) (fn [_e] 10))
              (handle q!)
              (<<!!))
          (is (= 10 (dq!)))
@@ -909,8 +910,8 @@ side-effect."
          (-> (async (/ 1 0))
              (finally (fn [v] (q! v)))
              (handle q!))
-         (is (a/error? (dq!)))
-         (is (a/error? (dq!))))
+         (is (error? (dq!)))
+         (is (error? (dq!))))
   (testa "It's nice to combine with catch"
          (-> (async (/ 1 0))
              (catch (fn [e] :error))
@@ -1314,7 +1315,7 @@ functions instead of plain async/await, because it will
 throw instead of all returning the error."
          (try
            (-> (all [1 (defer 10 2) (/ 1 0)])
-               (a/catch (q! :this-wont-work)))
+               (catch (q! :this-wont-work)))
            (catch Exception _
              (q! :this-will)))
          (is (= :this-will (dq!))))
@@ -1331,10 +1332,10 @@ to nil."
          (is (nil? (dq!)))))
 
 
-(deftest do!-tests
-  (testa "Use do! to perform asynchronous ops one after the other and
+(deftest ado-tests
+  (testa "Use ado to perform asynchronous ops one after the other and
 return the result of the last one only."
-         (-> (do! (blocking (q! :log))
+         (-> (ado (blocking (q! :log))
                   (blocking (q! :prep-database))
                   (blocking :run-query))
              (handle q!))

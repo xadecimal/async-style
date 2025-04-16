@@ -23,22 +23,6 @@
   (:refer-clojure :exclude [await time])
   (:require [com.xadecimal.async-style.impl :as impl]))
 
-(defn error?
-  "Returns true if v is considered an error as per async-style's error
-   representations, false otherwise. Valid error representations in async-style
-   for now are:
-     * instances of Throwable"
-  {:inline (fn ([v] ` (com.xadecimal.async-style.impl/error? ~v)))}
-  ([v] (com.xadecimal.async-style.impl/error? v)))
-
-(defn ok?
-  "Returns true if v is not considered an error as per async-style's error
-   representations, false otherwise. Valid error representations in async-style
-   for now are:
-     * instances of Throwable"
-  {:inline (fn ([v] ` (com.xadecimal.async-style.impl/ok? ~v)))}
-  ([v] (com.xadecimal.async-style.impl/ok? v)))
-
 (defn cancelled?
   "Returns true if execution context was cancelled and thus should be
    interrupted/short-circuited, false otherwise.
@@ -85,54 +69,6 @@
   ([chan] (com.xadecimal.async-style.impl/cancel chan))
   ([chan v] (com.xadecimal.async-style.impl/cancel chan v)))
 
-(defmacro <<!
-  "Parking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined."
-  {}
-  ([chan-or-value] ` (com.xadecimal.async-style.impl/<<! ~chan-or-value)))
-
-(defn <<!!
-  "Blocking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined."
-  {:inline (fn
-             ([chan-or-value]
-              `
-              (com.xadecimal.async-style.impl/<<!! ~chan-or-value)))}
-  ([chan-or-value] (com.xadecimal.async-style.impl/<<!! chan-or-value)))
-
-(defmacro <<?
-  "Parking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined. Supports implicit-try to handle thrown
-   exceptions such as:
-
-   (async
-     (<<? (async (/ 1 0))
-          (catch ArithmeticException e
-            (println e))
-          (catch Exception e
-            (println \"Other unexpected excpetion\"))
-          (finally (println \"done\"))))"
-  {}
-  ([chan-or-value & body]
-   `
-   (com.xadecimal.async-style.impl/<<? ~chan-or-value ~@body)))
-
-(defmacro <<??
-  "Blocking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined. Supports implicit-try to handle thrown
-   exceptions such as:
-
-   (<<? (async (/ 1 0))
-          (catch ArithmeticException e
-            (println e))
-          (catch Exception e
-            (println \"Other unexpected excpetion\"))
-          (finally (println \"done\")))"
-  {}
-  ([chan-or-value & body]
-   `
-   (com.xadecimal.async-style.impl/<<?? ~chan-or-value ~@body)))
-
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
    implicit-try, and returning a promise-chan settled with the result or any
@@ -169,8 +105,6 @@
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
    and with taken result fully joined.
 
-   Same as <<?
-
    Supports implicit-try to handle thrown exceptions such as:
 
    (async
@@ -188,8 +122,6 @@
 (defmacro wait
   "Blocking takes from chan-or-value so that any exception taken is re-thrown,
    and with taken result fully joined.
-
-   Same as <<??
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -379,13 +311,13 @@
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all chans)))
 
-(defmacro do!
-  "Execute expressions one after the other, awaiting the result of each one
-   before moving on to the next. Results are lost to the void, same as
-   clojure.core/do, so side effects are expected. Returns a promise-chan which
+(defmacro ado
+  "Asynchronous do. Execute expressions one after the other, awaiting the result
+   of each one before moving on to the next. Results are lost to the void, same
+   as clojure.core/do, so side effects are expected. Returns a promise-chan which
    settles with the result of the last expression when the entire do! is done."
   {}
-  ([& exprs] ` (com.xadecimal.async-style.impl/do! ~@exprs)))
+  ([& exprs] ` (com.xadecimal.async-style.impl/ado ~@exprs)))
 
 (defmacro alet
   "Asynchronous let. Binds result of async expressions to local binding, executing

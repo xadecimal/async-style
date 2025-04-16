@@ -327,8 +327,6 @@ they should short-circuit as soon as they can.")
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
    and with taken result fully joined.
 
-   Same as <<?
-
    Supports implicit-try to handle thrown exceptions such as:
 
    (async
@@ -344,8 +342,6 @@ they should short-circuit as soon as they can.")
 (defmacro wait
   "Blocking takes from chan-or-value so that any exception taken is re-thrown,
    and with taken result fully joined.
-
-   Same as <<??
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -604,10 +600,10 @@ they should short-circuit as soon as they can.")
       (a/close! ret))
     ret))
 
-(defmacro do!
-  "Execute expressions one after the other, awaiting the result of each one
-   before moving on to the next. Results are lost to the void, same as
-   clojure.core/do, so side effects are expected. Returns a promise-chan which
+(defmacro ado
+  "Asynchronous do. Execute expressions one after the other, awaiting the result
+   of each one before moving on to the next. Results are lost to the void, same
+   as clojure.core/do, so side effects are expected. Returns a promise-chan which
    settles with the result of the last expression when the entire do! is done."
   [& exprs]
   `(async
