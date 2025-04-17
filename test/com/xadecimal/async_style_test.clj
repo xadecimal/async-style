@@ -184,7 +184,7 @@ nil in that case, like :nil or (reduced nil)"
            (is (nil? @(wait promise-chan))))))
 
 
-(deftest <<!-tests
+(deftest await*-tests
   (testa "Takes a value from a chan."
          (async
            (q! (await* (async "Hello!"))))
@@ -235,7 +235,7 @@ value."
          (is (= 1 (dq!)))))
 
 
-(deftest <<!!-tests
+(deftest wait*-tests
   (testa "Takes a value from a chan."
          (is (= "Hello!" (wait* (async "Hello!")))))
 
@@ -272,59 +272,12 @@ value."
          (is (= 1 (wait* (async (async (async 1))))))))
 
 
-(deftest <<?-tests
-  (testa "Takes a value from a chan."
-         (async
-           (q! (await (async "Hello!"))))
-         (is (= "Hello!" (dq!))))
-
-  (testa "Parks if none are available yet, resumes only once a value is available."
-         (async
-           (let [pc (async (Thread/sleep 100)
-                           "This will only have a value after 100ms")]
-             (q! (System/currentTimeMillis))
-             (q! (await pc))
-             (q! (System/currentTimeMillis))))
-         (let [before-time (dq!)
-               ret (dq!)
-               after-time (dq!)]
-           (is (>= (- after-time before-time) 100))
-           (is (= "This will only have a value after 100ms" ret))))
-
-  (testa "Throws if used outside an async block"
-         (is (thrown? AssertionError (await (async)))))
-
-  (testa "Works on values as well, will just return it immediately."
-         (async (q! (await :a-value))
-                (q! (await 1))
-                (q! (await ["a" "b"]))
-                (q! (System/currentTimeMillis))
-                (q! (await :a-value))
-                (q! (System/currentTimeMillis)))
-         (is (= :a-value (dq!)))
-         (is (= 1 (dq!)))
-         (is (= ["a" "b"] (dq!)))
-         (let [before-time (dq!)
-               _ (dq!)
-               after-time (dq!)]
-           (is (<= (- after-time before-time) 1))))
-
-  (testa "If an exception is returned by chan, it will re-throw the exception."
-         (async (try
-                  (await (async (/ 1 0)))
-                  (catch ArithmeticException _
-                    (q! :thrown))))
-         (is (= :thrown (dq!))))
-
-  (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, await will also take from it, until it eventually takes a non chan
-value."
-         (async
-           (q! (await (async (async (async 1))))))
-         (is (= 1 (dq!)))))
-
-
-(deftest <<??-tests
+(deftest wait-tests
+  (testa "Wait is used to wait on the result of an async operation in a
+synchronous manner, meaning it will block the waiting thread. The upside
+is that unlike await, it can be used outside of an async context."
+         (is (= 3 (-> (async (+ 1 2))
+                      (wait)))))
   (testa "Takes a value from a chan."
          (is (= "Hello!" (wait (async "Hello!")))))
 
@@ -357,15 +310,8 @@ of parking."
   (testa "Taken value will be fully joined. That means if the value taken is
 itself a chan, wait will also take from it, until it eventually takes a non chan
 value."
-         (is (= 1 (wait (async (async (async 1))))))))
+         (is (= 1 (wait (async (async (async 1)))))))
 
-
-(deftest wait-tests
-  (testa "Wait is used to wait on the result of an async operation in a
-synchronous manner, meaning it will block the waiting thread. The upside
-is that unlike await, it can be used outside of an async context."
-         (is (= 3 (-> (async (+ 1 2))
-                      (wait)))))
   (testa "Takes a value from a chan."
          (is (= "Hello!" (wait (async "Hello!")))))
 
@@ -855,7 +801,57 @@ things in inner functions."
              (all-settled)
              (handle #(for [x %] (inc x)))
              (handle q!))
-         (is (= [2 3 4] (dq!)))))
+         (is (= [2 3 4] (dq!))))
+
+  (testa "Takes a value from a chan."
+         (async
+           (q! (await (async "Hello!"))))
+         (is (= "Hello!" (dq!))))
+
+  (testa "Parks if none are available yet, resumes only once a value is available."
+         (async
+           (let [pc (async (Thread/sleep 100)
+                           "This will only have a value after 100ms")]
+             (q! (System/currentTimeMillis))
+             (q! (await pc))
+             (q! (System/currentTimeMillis))))
+         (let [before-time (dq!)
+               ret (dq!)
+               after-time (dq!)]
+           (is (>= (- after-time before-time) 100))
+           (is (= "This will only have a value after 100ms" ret))))
+
+  (testa "Throws if used outside an async block"
+         (is (thrown? AssertionError (await (async)))))
+
+  (testa "Works on values as well, will just return it immediately."
+         (async (q! (await :a-value))
+                (q! (await 1))
+                (q! (await ["a" "b"]))
+                (q! (System/currentTimeMillis))
+                (q! (await :a-value))
+                (q! (System/currentTimeMillis)))
+         (is (= :a-value (dq!)))
+         (is (= 1 (dq!)))
+         (is (= ["a" "b"] (dq!)))
+         (let [before-time (dq!)
+               _ (dq!)
+               after-time (dq!)]
+           (is (<= (- after-time before-time) 1))))
+
+  (testa "If an exception is returned by chan, it will re-throw the exception."
+         (async (try
+                  (await (async (/ 1 0)))
+                  (catch ArithmeticException _
+                    (q! :thrown))))
+         (is (= :thrown (dq!))))
+
+  (testa "Taken value will be fully joined. That means if the value taken is
+itself a chan, await will also take from it, until it eventually takes a non chan
+value."
+         (async
+           (q! (await (async (async (async 1))))))
+         (is (= 1 (dq!)))))
 
 
 (deftest catch-tests

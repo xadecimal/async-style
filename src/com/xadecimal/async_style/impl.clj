@@ -11,8 +11,6 @@
 ;; TODO: Add ClojureScript support
 ;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
 ;; TODO: Consider supporting await for... like in Python or JS
-;; TODO: Delete the code for <<?? and <<? since it seems nothing uses it.
-;; TODO: Consider renaming <<! and <<!! as safe-await and safe-wait, or wait* await* or wait' and await'
 
 
 (def ^:private compute-pool
