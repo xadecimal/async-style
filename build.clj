@@ -48,13 +48,13 @@
     compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
                (:refer-clojure :exclude ~'[await time])
                (:require ~'[com.xadecimal.async-style.impl :as impl]))
-    :vars [#_#'impl/error?
-           #_#'impl/ok?
+    :vars [#'impl/error?
+           #'impl/ok?
            #'impl/cancelled?
            #'impl/check-cancelled!
            #'impl/cancel!
-           #_#'impl/await*
-           #_#'impl/wait*
+           #'impl/await*
+           #'impl/wait*
            #'impl/async
            #'impl/blocking
            #'impl/compute

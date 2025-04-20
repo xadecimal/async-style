@@ -23,6 +23,22 @@
   (:refer-clojure :exclude [await time])
   (:require [com.xadecimal.async-style.impl :as impl]))
 
+(defn error?
+  "Returns true if v is considered an error as per async-style's error
+   representations, false otherwise. Valid error representations in async-style
+   for now are:
+     * instances of Throwable"
+  {:inline (fn ([v] ` (com.xadecimal.async-style.impl/error? ~v)))}
+  ([v] (com.xadecimal.async-style.impl/error? v)))
+
+(defn ok?
+  "Returns true if v is not considered an error as per async-style's error
+   representations, false otherwise. Valid error representations in async-style
+   for now are:
+     * instances of Throwable"
+  {:inline (fn ([v] ` (com.xadecimal.async-style.impl/ok? ~v)))}
+  ([v] (com.xadecimal.async-style.impl/ok? v)))
+
 (defn cancelled?
   "Returns true if execution context was cancelled and thus should be
    interrupted/short-circuited, false otherwise.
@@ -68,6 +84,21 @@
              ([chan v] ` (com.xadecimal.async-style.impl/cancel! ~chan ~v)))}
   ([chan] (com.xadecimal.async-style.impl/cancel! chan))
   ([chan v] (com.xadecimal.async-style.impl/cancel! chan v)))
+
+(defmacro await*
+  "Parking takes from chan-or-value so that any exception is returned, and with
+   taken result fully joined."
+  {}
+  ([chan-or-value] ` (com.xadecimal.async-style.impl/await* ~chan-or-value)))
+
+(defn wait*
+  "Blocking takes from chan-or-value so that any exception is returned, and with
+   taken result fully joined."
+  {:inline (fn
+             ([chan-or-value]
+              `
+              (com.xadecimal.async-style.impl/wait* ~chan-or-value)))}
+  ([chan-or-value] (com.xadecimal.async-style.impl/wait* chan-or-value)))
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
