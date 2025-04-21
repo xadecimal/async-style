@@ -2,7 +2,7 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is]]
             [com.xadecimal.async-style :as a :refer :all]
-            [com.xadecimal.async-style.impl :refer [error? ok? await* wait*]]
+            [com.xadecimal.async-style.impl :as aimpl]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
            [java.util.concurrent CancellationException TimeoutException]
@@ -392,12 +392,16 @@ Because all blocks will run in a fixed size thread pool, which by default has on
 threads. This means you can't have more than 8 concurrent active blocks, others will
 get queued up and have to wait for one of those 8 to finish. That means avoid doing
 blocking operations or long running computations, for which you should use blocking
-or compute instead."
+or compute instead. In core.async 1.8+ this is no longer true, as the async pool
+has been replaced by an unbounded pool, but it is still a good practice to use
+it only for async control flow."
          (-> (for [i (range 10)]
                (async (Thread/sleep 1000) i))
              (all)
              (handle q!))
-         (is (= :timeout (dq! 1100))))
+         (if @#'aimpl/executor-for
+           (is (= [0 1 2 3 4 5 6 7 8 9] (dq! 1100)))
+           (is (= :timeout (dq! 1100)))))
 
   (testa "Async supports implicit-try, meaning you can catch/finally on it as you would
 with try/catch/finally. It's similar to if you always wrapped the inside in a try."

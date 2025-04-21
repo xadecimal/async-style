@@ -1,5 +1,8 @@
 {:tasks
- {test (clojure "-M:test")
+ {test (do (println "Testing with core.async 1.8+")
+           (clojure "-M:test")
+           (println "Now testing with core.async 1.7")
+           (clojure "-M:test:test-1.7"))
   gen (clojure "-X:build gen")
   lint (clojure "-X:build lint")
   deploy (clojure "-X:build deploy")

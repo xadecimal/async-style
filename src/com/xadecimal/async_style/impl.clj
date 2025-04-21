@@ -13,6 +13,11 @@
 ;; TODO: Consider supporting await for... like in Python or JS
 
 
+(def ^:private executor-for
+  "the core.async 1.8+ executor-for var, nil if we're on an older version of
+   core.async that doesn't have it"
+  (requiring-resolve `d/executor-for))
+
 (def ^:private compute-pool
   "the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores
    + 2 and pre-allocated, use it for heavy computation, don't block it"
@@ -21,12 +26,20 @@
 (def ^:private blocking-pool
   "the core.async thread block executor, it is caching, unbounded and not
    pre-allocated, use it for blocking operations and blocking io"
-  @#'a/thread-macro-executor) ; Used by a/thread
+  (if executor-for
+    ;; Used by a/io-thread
+    (@executor-for :io)
+    ;; Used by a/thread
+    @#'a/thread-macro-executor))
 
 (def ^:private async-pool
   "the core.async go block executor, it is fixed size, defaulting to 8 threads,
    don't soft or hard block it"
-  @d/executor) ; Used by a/go
+  (if executor-for
+    ;; Used by a/go in 1.8+
+    (@executor-for :core-async-dispatch)
+    ;; Used by a/go
+    @d/executor))
 
 
 (defn- implicit-try
@@ -162,17 +175,13 @@ they should short-circuit as soon as they can.")
    Returns a channel which will receive the result of calling f when completed,
    then close."
   [f]
-  (let [c (a/chan 1)]
-    (let [binds (clojure.lang.Var/getThreadBindingFrame)]
-      (.execute compute-pool
-                (fn []
-                  (clojure.lang.Var/resetThreadBindingFrame binds)
-                  (try
-                    (let [ret (f)]
-                      (when-not (nil? ret)
-                        (a/>!! c ret)))
-                    (finally
-                      (a/close! c))))))
+  (let [c (a/chan 1)
+        returning-to-chan (fn [bf]
+                            #(try
+                               (when-some [ret (bf)]
+                                 (a/>!! c ret))
+                               (finally (a/close! c))))]
+    (->> f bound-fn* returning-to-chan (.execute compute-pool))
     c))
 
 (defmacro compute'

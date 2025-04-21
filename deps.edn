@@ -1,6 +1,6 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.clojure/core.async {:mvn/version "1.7.701"}}
+        org.clojure/core.async {:mvn/version "1.8.741"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}
@@ -11,6 +11,7 @@
          :main-opts ["-m" "cognitect.test-runner"
                      "-d" "test"
                      "-r" "com.xadecimal.async-style.*"]}
+  :test-1.7 {:override-deps {org.clojure/core.async {:mvn/version "1.7.701"}}}
   ;; Run with clj -T:build function-in-build
   :build {:extra-deps {com.github.liquidz/build.edn {:mvn/version "0.11.266"}
                        com.xadecimal/expose-api {:mvn/version "0.3.0"}}
