@@ -201,7 +201,7 @@ they should short-circuit as soon as they can.")
   (let [settle- settle!]
     `(let [ret# (a/promise-chan)]
        (~(case execution-type
-           :blocking `a/thread
+           :blocking (if executor-for `a/io-thread `a/thread)
            :async `a/go
            :compute `compute')
         (binding [*cancellation-chan* ret#]
