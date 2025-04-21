@@ -11,6 +11,8 @@
 ;; TODO: Add ClojureScript support
 ;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
 ;; TODO: Consider supporting await for... like in Python or JS
+;; TODO: Cleanup <<?' and <<??'
+;; TODO: Is there a way cancel! could cancel a Thread/sleep or a (wait (sleep ..)) ?
 
 
 (def ^:private executor-for
@@ -122,8 +124,8 @@ they should short-circuit as soon as they can.")
    interrupted/short-circuited, false otherwise.
 
    Users are expected, when inside an execution block like async, blocking or
-   compute, to check using (cancelled? or check-cancelled!) as often as they can in case someone
-   tried to cancel their execution, in which case they should
+   compute, to check using (cancelled? or check-cancelled!) as often as they can
+   in case someone tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
   (if-let [v (a/poll! *cancellation-chan*)]
@@ -135,8 +137,8 @@ they should short-circuit as soon as they can.")
    interrupted/short-circuited, returns nil.
 
    Users are expected, when inside an execution block like async, blocking or
-   compute, to check using (cancelled? or check-cancelled!) as often as they can in case someone
-   tried to cancel their execution, in which case they should
+   compute, to check using (cancelled? or check-cancelled!) as often as they can
+   in case someone tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
   (when-let [v (a/poll! *cancellation-chan*)]
@@ -155,9 +157,9 @@ they should short-circuit as soon as they can.")
    That means by default a block that has its execution cancelled will return a
    CancellationException and thus awaiters and other takers of its result will
    see the exception and can handle it accordingly. If instead you want to cancel
-   the block so it returns a value, pass in a v and the awaiters and
-   takers will receive that value instead. You can't set nil as the cancelled
-   value, attempting to do so will throw an IllegalArgumentException.
+   the block so it returns a value, pass in a v and the awaiters and takers will
+   receive that value instead. You can't set nil as the cancelled value,
+   attempting to do so will throw an IllegalArgumentException.
 
    It is up to processes inside async, blocking and compute blocks to properly
    check for cancellation on a channel."
