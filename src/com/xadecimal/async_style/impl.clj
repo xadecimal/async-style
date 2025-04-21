@@ -43,6 +43,14 @@
     @d/executor))
 
 
+(defn- make-cancellation-exception
+  []
+  (CancellationException. "Operation was cancelled."))
+
+(defn- make-interrupted-exception
+  []
+  (InterruptedException. "Operation was interrupted."))
+
 (defn- implicit-try
   "Wraps body in an implicit (try body) and uses the last forms of body if they
    are one or more catch, a finally or a combination of those as the catch(s) and
@@ -110,14 +118,6 @@ blocking or compute to check this channel using cancelled? to
 see if someone tried to cancel their execution, in which case
 they should short-circuit as soon as they can.")
 
-(defn- cancelled-val?
-  "Returns true if v indicates a cancellation as per async-style's cancellation
-   representations, false otherwise. Valid cancellation representations in
-   async-style for now are:
-     * all non-nil values"
-  [v]
-  (not (nil? v)))
-
 (defn cancelled?
   "Returns true if execution context was cancelled and thus should be
    interrupted/short-circuited, false otherwise.
@@ -127,8 +127,9 @@ they should short-circuit as soon as they can.")
    in case someone tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
-  (if-let [v (a/poll! *cancellation-chan*)]
-    (cancelled-val? v)
+  (if (or (some? (a/poll! *cancellation-chan*))
+          (.isInterrupted (Thread/currentThread)))
+    true
     false))
 
 (defn check-cancelled!
@@ -140,9 +141,8 @@ they should short-circuit as soon as they can.")
    in case someone tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
-  (when-let [v (a/poll! *cancellation-chan*)]
-    (when (cancelled-val? v)
-      (throw (CancellationException.)))))
+  (when (cancelled?)
+    (throw (make-interrupted-exception))))
 
 (defn cancel!
   "When called on chan, tries to tell processes currently executing over the
@@ -164,7 +164,7 @@ they should short-circuit as soon as they can.")
    check for cancellation on a channel."
   ([chan]
    (when (chan? chan)
-     (settle! chan (CancellationException. "Operation was cancelled."))))
+     (settle! chan (make-cancellation-exception))))
   ([chan v]
    (when (nil? v)
      (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
@@ -199,18 +199,38 @@ they should short-circuit as soon as they can.")
    with the result or any exception thrown."
   [body execution-type]
   (let [settle- settle!]
-    `(let [ret# (a/promise-chan)]
-       (~(case execution-type
-           :blocking (if executor-for `a/io-thread `a/thread)
-           :async `a/go
-           :compute `compute')
-        (binding [*cancellation-chan* ret#]
-          (when-not (cancelled?)
-            (~settle- ret#
-             (try ~@(implicit-try body)
-                  (catch Throwable t#
-                    t#))))))
-       ret#)))
+    (case execution-type
+      :async `(let [ret# (a/promise-chan)]
+                (a/go
+                  (binding [*cancellation-chan* ret#]
+                    (when-not (cancelled?)
+                      (~settle- ret#
+                       (try ~@(implicit-try body)
+                            (catch Throwable t#
+                              t#))))))
+                ret#)
+      `(let [ret# (a/promise-chan)
+             interrupter-thread# (atom nil)
+             interrupter# (a/go
+                            (when (some? (a/<! ret#))
+                              (when-some [t# (first (swap-vals! interrupter-thread# (constantly nil)))]
+                                (.interrupt t#))))]
+         (~(case execution-type
+             :blocking (if executor-for `a/io-thread `a/thread)
+             :compute `compute')
+          (reset! interrupter-thread# (Thread/currentThread))
+          (try
+            (binding [*cancellation-chan* ret#]
+              (when-not (cancelled?)
+                (let [result# (try ~@(implicit-try body)
+                                   (catch Throwable t#
+                                     t#))]
+                  (reset! interrupter-thread# nil)
+                  (~settle- ret# result#))))
+            (finally
+              ;; Clear the interrupt flag in case it was set
+              (Thread/interrupted))))
+         ret#))))
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,

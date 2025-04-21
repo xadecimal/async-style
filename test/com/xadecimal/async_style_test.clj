@@ -100,14 +100,14 @@ it using check-cancelled! inside your async blocks."
   (testa "When used outside an async block, it throws."
          (is (thrown? IllegalArgumentException (check-cancelled!))))
 
-  (testa "Throws CancellationException if cancelled."
+  (testa "Throws InterruptedException if cancelled."
          (let [promise-chan (async (Thread/sleep 60)
                                    (check-cancelled!)
-                                   (catch CancellationException e
+                                   (catch InterruptedException e
                                      (q! e)))]
            (Thread/sleep 30)
            (cancel! promise-chan))
-         (is (instance? CancellationException (dq!))))
+         (is (instance? InterruptedException (dq!))))
 
   (testa "Returns nil and doesn't throw otherwise."
          (async (q! (check-cancelled!))
@@ -453,7 +453,19 @@ chan will return that value instead of throwing a CancellationException."
            (Thread/sleep 5)
            (cancel! work :had-to-cancel)
            (handle work q!))
-         (is (= :had-to-cancel (dq!)))))
+         (is (= :had-to-cancel (dq!))))
+
+  (testa "Java platform level cancellation is not supported in async, and
+therefore, if you block inside it, which you are not supposed to do, you won't
+be able to cancel those blocking ops."
+         (let [task (async (Thread/sleep 500)
+                           (println "This will print")
+                           (q! :was-cancelled))]
+           (Thread/sleep 100)
+           (cancel! task :cancelled)
+           (q! (wait task))
+           (is (= :cancelled (dq!)))
+           (is (= :was-cancelled (dq!))))))
 
 
 (deftest blocking-tests
@@ -556,7 +568,19 @@ chan will return that value instead of throwing a CancellationException."
            (Thread/sleep 5)
            (cancel! work :had-to-cancel)
            (handle work q!))
-         (is (= :had-to-cancel (dq!)))))
+         (is (= :had-to-cancel (dq!))))
+
+  (testa "Java platform level cancellation is also supported, it will cause
+an interrupt of the thread, therefore even cancelling the Java operation, if
+it supports handling thread interrupted."
+         (let [task (blocking (Thread/sleep 500)
+                              (println "This won't print")
+                              (q! :was-not-cancelled))]
+           (Thread/sleep 100)
+           (cancel! task :cancelled)
+           (q! (wait task))
+           (is (= :cancelled (dq!)))
+           (is (not= :was-not-cancelled (dq!))))))
 
 
 (deftest compute-tests
@@ -663,7 +687,19 @@ chan will return that value instead of throwing a CancellationException."
            (Thread/sleep 5)
            (cancel! work :had-to-cancel)
            (handle work q!))
-         (is (= :had-to-cancel (dq!)))))
+         (is (= :had-to-cancel (dq!))))
+
+  (testa "Java platform level cancellation is also supported, it will cause
+an interrupt of the thread, therefore even cancelling the Java operation, if
+it supports handling thread interrupted."
+         (let [task (compute (Thread/sleep 500)
+                             (println "This won't print")
+                             (q! :was-not-cancelled))]
+           (Thread/sleep 100)
+           (cancel! task :cancelled)
+           (q! (wait task))
+           (is (= :cancelled (dq!)))
+           (is (not= :was-not-cancelled (dq!))))))
 
 
 (deftest await-tests
@@ -1097,15 +1133,15 @@ choosing on timeout instead."
   (testa "Race cancels all other chans once one of them fulfills."
          (-> (race [(blocking
                       (Thread/sleep 100)
-                      (when (cancelled?)
+                      (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
-                      (when (cancelled?)
+                      (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
-                      (when (cancelled?)
+                      (catch InterruptedException _
                         (q! :cancelled)))
                     (async :done)])
              (handle q!))
@@ -1118,15 +1154,15 @@ choosing on timeout instead."
    still cancelled."
          (-> (race [(blocking
                       (Thread/sleep 100)
-                      (when (cancelled?)
+                      (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
-                      (when (cancelled?)
+                      (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
-                      (when (cancelled?)
+                      (catch InterruptedException _
                         (q! :cancelled)))
                     (async (throw (ex-info "error" {})))])
              (handle q!))
@@ -1186,15 +1222,15 @@ choosing on timeout instead."
   (testa "Any cancels all other chans once one of them fulfills in ok?."
          (-> (any [(blocking
                      (Thread/sleep 100)
-                     (when (cancelled?)
+                     (catch InterruptedException _
                        (q! :cancelled)))
                    (blocking
                      (Thread/sleep 100)
-                     (when (cancelled?)
+                     (catch InterruptedException _
                        (q! :cancelled)))
                    (blocking
                      (Thread/sleep 100)
-                     (when (cancelled?)
+                     (catch InterruptedException _
                        (q! :cancelled)))
                    (defer 30 :done)
                    (async (q! :throwed) (throw (ex-info "" {})))])
@@ -1210,14 +1246,14 @@ choosing on timeout instead."
    ones will cancel."
          (-> (any [(blocking
                      (Thread/sleep 30)
-                     (if (cancelled?)
-                       (q! :cancelled)
-                       (q! :not-cancelled)))
+                     (q! :not-cancelled)
+                     (catch InterruptedException _
+                       (q! :cancelled)))
                    (blocking
                      (Thread/sleep 60)
-                     (if (cancelled?)
-                       (q! :cancelled)
-                       (q! :not-cancelled)))
+                     (q! :not-cancelled)
+                     (catch InterruptedException _
+                       (q! :cancelled)))
                    (async (throw (ex-info "error" {})))])
              (handle q!))
          (is (= :not-cancelled (dq!)))
@@ -1462,7 +1498,7 @@ happen where bindings are replaced by await or wait depending on their context."
                    (await (blocking (async a)))
                    (await (async (blocking a)))
                    (await (async (compute a)))
-                   (await (compute a (async a (blocking a (async a))))))))
+                   (await (async a (blocking a (async a)))))))
           q!)
          (is (= 15 (dq!)))
          (is (< 0 (dq!) 50))
@@ -1490,10 +1526,9 @@ happen where bindings are replaced by await or wait depending on their context."
                         (await (async (compute (com.xadecimal.async-style.impl/wait a))))
                         (await (async (compute (com.xadecimal.async-style.impl/wait a))))
                         (await
-                            (compute (com.xadecimal.async-style.impl/wait a)
-                                     (async (com.xadecimal.async-style.impl/await a)
-                                            (blocking (com.xadecimal.async-style.impl/wait a)
-                                                      (async (com.xadecimal.async-style.impl/await a)))))))))
+                            (async (com.xadecimal.async-style.impl/await a)
+                                   (blocking (com.xadecimal.async-style.impl/wait a)
+                                             (async (com.xadecimal.async-style.impl/await a))))))))
                 (macroexpand '(com.xadecimal.async-style.impl/clet
                                   [x 1
                                    a (compute x)
@@ -1511,7 +1546,7 @@ happen where bindings are replaced by await or wait depending on their context."
                                    (await (async (blocking a)))
                                    (await (async (compute a)))
                                    (await (async (compute a)))
-                                   (await (compute a (async a (blocking a (async a))))))))))))
+                                   (await (async a (blocking a (async a)))))))))))
 
 
 (deftest time-tests
