@@ -11,7 +11,6 @@
 ;; TODO: Add ClojureScript support
 ;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
 ;; TODO: Consider supporting await for... like in Python or JS
-;; TODO: Cleanup <<?' and <<??'
 ;; TODO: Is there a way cancel! could cancel a Thread/sleep or a (wait (sleep ..)) ?
 
 
