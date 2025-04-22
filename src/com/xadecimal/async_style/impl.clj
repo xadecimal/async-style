@@ -4,15 +4,16 @@
             [clojure.core.async.impl.dispatch :as d])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
            [clojure.lang Agent]
-           [java.util.concurrent CancellationException TimeoutException]))
+           [java.util.concurrent CancellationException TimeoutException]
+           [java.util.concurrent.locks ReentrantLock]))
 
 
 ;; TODO: add support for CSP style, maybe a process-factory that creates processes with ins/outs channels of buffer 1 and connectors between them
 ;; TODO: Add ClojureScript support
 ;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
 ;; TODO: Consider supporting await for... like in Python or JS
-;; TODO: Is there a way cancel! could cancel a Thread/sleep or a (wait (sleep ..)) ?
-
+;; TODO: Check if I need to type hint anything
+;; TODO: Consider if I should wrap the returned promise-chan in my own type, then I could have a proper cancel-chan and other stuff on it as well, instead of cramming all semantics on the promise-chan
 
 (def ^:private executor-for
   "the core.async 1.8+ executor-for var, nil if we're on an older version of
@@ -193,6 +194,16 @@ they should short-circuit as soon as they can.")
   (let [compute-call- compute-call]
     `(~compute-call- (^:once fn* [] ~@body))))
 
+(defmacro with-lock
+  "Run body while holding the given ReentrantLock."
+  [^ReentrantLock lock & body]
+  `(do
+     (.lock ~lock)
+     (try
+       ~@body
+       (finally
+         (.unlock ~lock)))))
+
 (defn- async'
   "Wraps body in a way that it executes in an async or blocking block with
    support for cancellation, implicit-try, and returning a promise-chan settled
@@ -210,26 +221,27 @@ they should short-circuit as soon as they can.")
                               t#))))))
                 ret#)
       `(let [ret# (a/promise-chan)
-             interrupter-thread# (atom nil)
+             interrupter-thread# (volatile! nil)
+             interrupt-lock# (ReentrantLock.)
              interrupter# (a/go
                             (when (some? (a/<! ret#))
-                              (when-some [t# (first (swap-vals! interrupter-thread# (constantly nil)))]
-                                (.interrupt t#))))]
+                              (with-lock interrupt-lock#
+                                (when-some [t# @interrupter-thread#]
+                                  (.interrupt t#)))))]
          (~(case execution-type
              :blocking (if executor-for `a/io-thread `a/thread)
              :compute `compute')
-          (reset! interrupter-thread# (Thread/currentThread))
+          (vreset! interrupter-thread# (Thread/currentThread))
           (try
             (binding [*cancellation-chan* ret#]
               (when-not (cancelled?)
-                (let [result# (try ~@(implicit-try body)
-                                   (catch Throwable t#
-                                     t#))]
-                  (reset! interrupter-thread# nil)
-                  (~settle- ret# result#))))
+                (~settle- ret#
+                 (try ~@(implicit-try body)
+                      (catch Throwable t#
+                        t#)))))
             (finally
-              ;; Clear the interrupt flag in case it was set
-              (Thread/interrupted))))
+              (with-lock interrupt-lock#
+                (vreset! interrupter-thread# nil)))))
          ret#))))
 
 (defmacro async
