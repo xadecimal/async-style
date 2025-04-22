@@ -4,7 +4,7 @@
             [clojure.core.async.impl.dispatch :as d])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
            [clojure.lang Agent]
-           [java.util.concurrent CancellationException TimeoutException]
+           [java.util.concurrent CancellationException TimeoutException ThreadPoolExecutor]
            [java.util.concurrent.locks ReentrantLock]))
 
 
@@ -12,7 +12,6 @@
 ;; TODO: Add ClojureScript support
 ;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
 ;; TODO: Consider supporting await for... like in Python or JS
-;; TODO: Check if I need to type hint anything
 ;; TODO: Consider if I should wrap the returned promise-chan in my own type, then I could have a proper cancel-chan and other stuff on it as well, instead of cramming all semantics on the promise-chan
 
 (def ^:private executor-for
@@ -20,7 +19,7 @@
    core.async that doesn't have it"
   (requiring-resolve `d/executor-for))
 
-(def ^:private compute-pool
+(def ^:private ^ThreadPoolExecutor compute-pool
   "the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores
    + 2 and pre-allocated, use it for heavy computation, don't block it"
   Agent/pooledExecutor) ; Fixed bounded to cpu core + 2 and pre-allocated
@@ -226,7 +225,7 @@ they should short-circuit as soon as they can.")
              interrupter# (a/go
                             (when (some? (a/<! ret#))
                               (with-lock interrupt-lock#
-                                (when-some [t# @interrupter-thread#]
+                                (when-some [^Thread t# @interrupter-thread#]
                                   (.interrupt t#)))))]
          (~(case execution-type
              :blocking (if executor-for `a/io-thread `a/thread)
