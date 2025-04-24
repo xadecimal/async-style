@@ -150,7 +150,7 @@ Meaning it offers `async`/`blocking`/`compute`, each are meant to specialize the
 ### Awaiting: `await`, `wait`, `await*`, `wait*`
 
 - **`await`** (inside `async`): parks current go‑thread until a promise‑chan completes; re‑throws errors.
-- **`wait`** (outside `async`): blocks calling thread for a result or error.
+- **`wait`** (outside `async`): blocks calling thread for a result or throws error.
 - **`await*` / `wait*`**: return exceptions as values (no throw).
 
 `await` is like your JavaScript await, but just like core.async's `go`, it cannot park across function boundaries,
@@ -258,7 +258,7 @@ They return either the successful value *or* the `Throwable`. Functions `error?`
       (println "Success:" result))))
 ```
 
-Errors are always modeled this way in async-chan, unlike in JS which wraps errors in a map, in async-style they are either an error? or an ok? result:
+Errors are always modeled this way in async-style, unlike in JS which wraps errors in a map, in async-style they are either an error? or an ok? result:
 
 ```clojure
 (async
@@ -359,12 +359,12 @@ Cancellation in **async-style** is **cooperative**—you signal it with `cancel!
 
 ### Helpers: `ado`, `alet`, `clet`, `time`
 
-| Macro | Description                                                                                                      |
-|-------|------------------------------------------------------------------------------------------------------------------|
-| `ado` | Execute expressions one after another, awaiting each; returns a promise‑chan of the last expression.             |
-| `alet`| Like `let` but each binding is awaited in order before evaluating the body.                                      |
-| `clet`| Concurrent `let`: evaluates all bindings in parallel, auto‑awaiting any dependencies between them.               |
-| `time`| Measure wall‑clock time of a sync or async expression; prints the elapsed ms and returns the expression’s value. |
+| Macro | Description                                                                                                             |
+|-------|-------------------------------------------------------------------------------------------------------------------------|
+| `ado` | Asynchronous `do`: execute expressions one after another, awaiting each; returns a promise‑chan of the last expression. |
+| `alet`| Asynchronous `let`: like `let` but each binding is awaited in order before evaluating the body.                         |
+| `clet`| Concurrent `let`: evaluates all bindings in parallel, auto‑awaiting any dependencies between them.                      |
+| `time`| Measure wall‑clock time of a sync or async expression; prints the elapsed ms and returns the expression’s value.        |
 
 ### Asynchronous `let` (`alet`) and Concurrent `let` (`clet`)
 
