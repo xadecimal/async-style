@@ -287,12 +287,12 @@ Cancellation in **async-style** is **cooperative**—you signal it with `cancel!
 
 - **`check-cancelled!`**
   ```clojure
-  (check-cancelled!)  ; throws CancellationException if cancelled
+  (check-cancelled!)  ; throws InterruptedException if cancelled
   ```
   Throws immediately when cancelled, so you can use it at safe points to short‑circuit heavy loops or I/O.
 
 - **Handling cancellation downstream**
-  - `await` / `wait` will re‑throw the `CancellationException` (or return your custom val).
+  - `await` / `wait` will re‑throw a `CancellationException` (or return your custom val).
 
 ```clojure
 (def work
