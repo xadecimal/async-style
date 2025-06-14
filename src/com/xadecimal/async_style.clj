@@ -21,7 +21,8 @@
     blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
     compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
   (:refer-clojure :exclude [await time])
-  (:require [com.xadecimal.async-style.impl :as impl]))
+  (:require [com.xadecimal.async-style.impl :as impl]
+            [com.xadecimal.async-style.protocols :as proto]))
 
 (defn error?
   "Returns true if v is considered an error as per async-style's error
@@ -84,6 +85,17 @@
              ([chan v] ` (com.xadecimal.async-style.impl/cancel! ~chan ~v)))}
   ([chan] (com.xadecimal.async-style.impl/cancel! chan))
   ([chan v] (com.xadecimal.async-style.impl/cancel! chan v)))
+
+(defn ->promise-chan
+  "Coerce to a promise-chan if possible, otherwise is just a pass-through.
+
+     Currently supports:
+       * Future
+       * CompletableFuture
+       * IBlockingDeref"
+  {:inline
+     (fn ([this] ` (com.xadecimal.async-style.protocols/->promise-chan ~this)))}
+  ([this] (com.xadecimal.async-style.protocols/->promise-chan this)))
 
 (defmacro await*
   "Parking takes from chan-or-value so that any exception is returned, and with

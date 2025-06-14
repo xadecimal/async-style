@@ -1,10 +1,12 @@
 (ns com.xadecimal.async-style.impl
   (:refer-clojure :exclude [await time])
   (:require [clojure.core.async :as a]
-            [clojure.core.async.impl.dispatch :as d])
+            [clojure.core.async.impl.dispatch :as d]
+            [com.xadecimal.async-style.protocols :as proto :refer [->promise-chan]])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
-           [clojure.lang Agent]
-           [java.util.concurrent CancellationException TimeoutException ThreadPoolExecutor]
+           [clojure.lang Agent IBlockingDeref]
+           [java.util.concurrent CancellationException TimeoutException
+            ThreadPoolExecutor CompletableFuture Future ExecutionException]
            [java.util.concurrent.locks ReentrantLock]))
 
 
@@ -275,29 +277,52 @@ they should short-circuit as soon as they can.")
   [& body]
   (async' body :compute))
 
+(extend-protocol proto/IntoPromiseChan
+  nil
+  (->promise-chan [this] this)
+  ManyToManyChannel
+  (->promise-chan [this] this)
+  IBlockingDeref
+  (->promise-chan [this]
+    (blocking @this
+              (catch InterruptedException _
+                (when (instance? Future this)
+                  (future-cancel this)))
+              (catch ExecutionException e
+                (throw (.getCause e)))))
+  CompletableFuture
+  (->promise-chan [this]
+    (blocking @this
+              (catch InterruptedException _
+                (.cancel this true))
+              (catch ExecutionException e
+                (throw (.getCause e)))))
+  Object
+  (->promise-chan [this] this))
+
 (defn- join'
   "Parking take from chan, but if result taken is still a chan?, further parking
    take from it, repeating until first non chan? result and return it."
   [chan]
   (let [chan?- chan?]
-    `(loop [res# (a/<! ~chan)]
-       (if (~chan?- res#)
-         (recur (a/<! res#))
-         res#))))
+    `(let [chan# (->promise-chan ~chan)]
+       (if (~chan?- chan#)
+         (loop [res# (->promise-chan (a/<! chan#))]
+           (if (~chan?- res#)
+             (recur (->promise-chan (a/<! res#)))
+             res#))
+         chan#))))
 
 (defn- <<!'
   "Wraps chan-or-value so that if chan it joins from it returning the joined
    result, else if value it returns value directly, or if chan-or-value throws it
    returns the thrown exception."
   [chan-or-value]
-  (let [chan-or-value-gensym (gensym 'chan-or-value)
-        chan?- chan?]
+  (let [chan-or-value-gensym (gensym 'chan-or-value)]
     `(let [~chan-or-value-gensym (try ~chan-or-value
                                       (catch Throwable t#
                                         t#))
-           value-or-error# (if (~chan?- ~chan-or-value-gensym)
-                             ~(join' chan-or-value-gensym)
-                             ~chan-or-value-gensym)]
+           value-or-error# ~(join' chan-or-value-gensym)]
        value-or-error#)))
 
 (defmacro await*
@@ -310,12 +335,13 @@ they should short-circuit as soon as they can.")
   "Blocking takes from chan-or-value so that any exception is returned, and with
    taken result fully joined."
   [chan-or-value]
-  (if (chan? chan-or-value)
-    (loop [res (a/<!! chan-or-value)]
-      (if (chan? res)
-        (recur (a/<!! res))
-        res))
-    chan-or-value))
+  (let [chan-or-value (->promise-chan chan-or-value)]
+    (if (chan? chan-or-value)
+      (loop [res (->promise-chan (a/<!! chan-or-value))]
+        (if (chan? res)
+          (recur (->promise-chan (a/<!! res)))
+          res))
+      chan-or-value)))
 
 (defn- <<?'
   "Wraps chan-or-value so that if chan it joins from it returning the joined

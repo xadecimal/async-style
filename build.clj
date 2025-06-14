@@ -1,7 +1,8 @@
 (ns build
   (:require [com.xadecimal.async-style.impl :as impl]
             [com.xadecimal.expose-api :as ea]
-            [build-edn.main :as build-edn]))
+            [build-edn.main :as build-edn]
+            [com.xadecimal.async-style.protocols :as proto]))
 
 (defn lint
   [m]
@@ -47,12 +48,14 @@
     blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
     compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
                (:refer-clojure :exclude ~'[await time])
-               (:require ~'[com.xadecimal.async-style.impl :as impl]))
+               (:require ~'[com.xadecimal.async-style.impl :as impl]
+                         ~'[com.xadecimal.async-style.protocols :as proto]))
     :vars [#'impl/error?
            #'impl/ok?
            #'impl/cancelled?
            #'impl/check-cancelled!
            #'impl/cancel!
+           #'proto/->promise-chan
            #'impl/await*
            #'impl/wait*
            #'impl/async

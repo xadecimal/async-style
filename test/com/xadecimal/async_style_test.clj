@@ -2,10 +2,11 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is]]
             [com.xadecimal.async-style :as a :refer :all]
-            [com.xadecimal.async-style.impl :as aimpl]
+            [com.xadecimal.async-style.impl :as impl]
             [com.xadecimal.testa :refer [testa q! dq!]])
   (:import [java.lang AssertionError]
-           [java.util.concurrent CancellationException TimeoutException]
+           [java.util.concurrent CancellationException TimeoutException
+            CompletableFuture]
            [clojure.core.async.impl.channels ManyToManyChannel]
            [clojure.lang ExceptionInfo]))
 
@@ -347,6 +348,206 @@ value."
          (is (= 1 (wait (async (async (async 1))))))))
 
 
+(deftest ->promise-chan-tests
+  (testa "Given a promise-chan, returns it."
+         (let [pc (async 0)]
+           (is (= pc (->promise-chan pc)))))
+  (testa "Given a future, returns a promise-chan of it"
+         (let [f (future 0)]
+           (is (#'impl/chan? (->promise-chan f)))))
+  (testa "Given a CompletableFuture, returns a promise-chan of it"
+         (let [f (CompletableFuture/completedFuture 0)]
+           (is (#'impl/chan? (->promise-chan f)))))
+  (testa "Given a IBlockingDeref, returns a promise-chan of it"
+         (let [f (promise)]
+           (is (#'impl/chan? (->promise-chan f)))))
+  (testa "Given a non-coercable to promise-chan, returns it."
+         (let [x nil]
+           (is (= x (->promise-chan x))))
+         (let [x 1]
+           (is (= x (->promise-chan x))))
+         (let [x (atom 0)]
+           (is (= x (->promise-chan x))))
+         (let [x "abc"]
+           (is (= x (->promise-chan x)))))
+  (testa "When a future is coerced, it still supports cancellation."
+         (let [pc (->promise-chan (future (Thread/sleep 500) (q! "baz") 123))]
+           (Thread/sleep 100)
+           (cancel! pc :cancelled)
+           (is (= :cancelled (wait pc)))
+           (is (= :timeout (dq!)))))
+  (testa "When a CompletableFuture is coerced, it still supports cancellation.
+CompletableFuture can't interrupt themselves, but will be marked as cancelled."
+         (let [cf (CompletableFuture/supplyAsync
+                   (bound-fn [] (Thread/sleep 500) (q! "baz") 123))
+               pc (->promise-chan cf)]
+           (Thread/sleep 100)
+           (cancel! pc :cancelled)
+           (is (= :cancelled (wait pc)))
+           (is (="baz" (dq!)))
+           (is (true? (.isCancelled cf)))))
+  (testa "If an error occurs inside the future, IBlockingDeref or CompletableFuture
+it is properly coerced as a standard async-style error. We unwrap ExecutionException
+from Future and CompletableFuture so you get the same exception as if you'd use
+async-style to execute the task"
+         (is (thrown? ArithmeticException (wait (future (/ 1 0)))))
+         (is (thrown? ArithmeticException (wait (-> (promise) (deliver (/ 1 0))))))
+         (is (thrown? ArithmeticException (wait (CompletableFuture/supplyAsync
+                                                 (bound-fn [] (/ 1 0)))))))
+  (testa "Nested combinations of future, IBlockingDeref, CompletableFuture
+and PromiseChan all unwrap and join fully."
+         (is (= 1 (wait (future (future 1)))))
+         (is (= 1 (wait (-> (promise) (deliver (-> (promise) (deliver 1)))))))
+         (is (= 1 (wait (CompletableFuture/supplyAsync
+                         (bound-fn [] (CompletableFuture/supplyAsync
+                                       (bound-fn [] 1)))))))
+         (is (= 1 (wait (async (future 1)))))
+         (is (= 1 (wait (-> (promise) (deliver (compute 1))))))
+         (is (= 1 (wait (async (CompletableFuture/supplyAsync
+                                (bound-fn [] 1))))))
+         (is (= 1 (wait (future
+                          (-> (promise)
+                              (deliver
+                               (CompletableFuture/supplyAsync
+                                (bound-fn []
+                                  (-> (promise)
+                                      (deliver
+                                       (future
+                                         (CompletableFuture/supplyAsync
+                                          (bound-fn [] 1))))))))))))))
+  (testa "Even with wait*"
+         (is (= 1 (wait* (future (future 1)))))
+         (is (= 1 (wait* (-> (promise) (deliver (-> (promise) (deliver 1)))))))
+         (is (= 1 (wait* (CompletableFuture/supplyAsync
+                          (bound-fn [] (CompletableFuture/supplyAsync
+                                        (bound-fn [] 1)))))))
+         (is (= 1 (wait* (async (future 1)))))
+         (is (= 1 (wait* (-> (promise) (deliver (compute 1))))))
+         (is (= 1 (wait* (async (CompletableFuture/supplyAsync
+                                 (bound-fn [] 1))))))
+         (is (= 1 (wait* (future
+                           (-> (promise)
+                               (deliver
+                                (CompletableFuture/supplyAsync
+                                 (bound-fn []
+                                   (-> (promise)
+                                       (deliver
+                                        (future
+                                          (CompletableFuture/supplyAsync
+                                           (bound-fn [] 1))))))))))))))
+  (testa "Even with await"
+         (async
+           (q! (await (future (future 1))))
+           (q! (await (-> (promise) (deliver (-> (promise) (deliver 1))))))
+           (q! (await (CompletableFuture/supplyAsync
+                       (bound-fn [] (CompletableFuture/supplyAsync
+                                     (bound-fn [] 1))))))
+           (q! (await (async (future 1))))
+           (q! (await (-> (promise) (deliver (compute 1)))))
+           (q! (await (async (CompletableFuture/supplyAsync
+                              (bound-fn [] 1)))))
+           (q! (await (future
+                        (-> (promise)
+                            (deliver
+                             (CompletableFuture/supplyAsync
+                              (bound-fn []
+                                (-> (promise)
+                                    (deliver
+                                     (future
+                                       (CompletableFuture/supplyAsync
+                                        (bound-fn [] 1)))))))))))))
+         (dotimes [_i 7]
+           (is (= 1 (dq!)))))
+  (testa "Even with await*"
+         (async
+           (q! (await* (future (future 1))))
+           (q! (await* (-> (promise) (deliver (-> (promise) (deliver 1))))))
+           (q! (await* (CompletableFuture/supplyAsync
+                        (bound-fn [] (CompletableFuture/supplyAsync
+                                      (bound-fn [] 1))))))
+           (q! (await* (async (future 1))))
+           (q! (await* (-> (promise) (deliver (compute 1)))))
+           (q! (await* (async (CompletableFuture/supplyAsync
+                               (bound-fn [] 1)))))
+           (q! (await* (future
+                         (-> (promise)
+                             (deliver
+                              (CompletableFuture/supplyAsync
+                               (bound-fn []
+                                 (-> (promise)
+                                     (deliver
+                                      (future
+                                        (CompletableFuture/supplyAsync
+                                         (bound-fn [] 1)))))))))))))
+         (dotimes [_i 7]
+           (is (= 1 (dq!)))))
+  (testa "Even for errors"
+         (is (thrown? ArithmeticException
+                      (wait (future (future (/ 1 0))))))
+         (is (thrown? ArithmeticException
+                      (wait (-> (promise) (deliver (-> (promise) (deliver (/ 1 0))))))))
+         (is (thrown? ArithmeticException
+                      (wait (CompletableFuture/supplyAsync
+                             (bound-fn [] (CompletableFuture/supplyAsync
+                                           (bound-fn [] (/ 1 0))))))))
+         (is (thrown? ArithmeticException
+                      (wait (async (future (/ 1 0))))))
+         (is (thrown? ArithmeticException
+                      (wait (-> (promise) (deliver (compute (/ 1 0)))))))
+         (is (thrown? ArithmeticException
+                      (wait (async (CompletableFuture/supplyAsync
+                                    (bound-fn [] (/ 1 0)))))))
+         (is (thrown? ArithmeticException
+                      (wait (future
+                              (-> (promise)
+                                  (deliver
+                                   (CompletableFuture/supplyAsync
+                                    (bound-fn []
+                                      (-> (promise)
+                                          (deliver
+                                           (future
+                                             (CompletableFuture/supplyAsync
+                                              (bound-fn [] (/ 1 0)))))))))))))))
+  (testa "Waiting for future, IBlockingDeref or CompletableFuture works as
+expected."
+         (is (= 1 (wait (CompletableFuture/supplyAsync
+                         (bound-fn [] (Thread/sleep 250) 1)))))
+         (is (= 1 (wait* (CompletableFuture/supplyAsync
+                          (bound-fn [] (Thread/sleep 250) 1)))))
+         (async (q! (await (CompletableFuture/supplyAsync
+                            (bound-fn [] (Thread/sleep 250) 1))))
+                (q! (await* (CompletableFuture/supplyAsync
+                             (bound-fn [] (Thread/sleep 250) 1)))))
+         (is (= 1 (dq!)))
+         (is (= 1 (dq!))))
+  (testa "If a future or CompletableFuture is cancelled, it's cancellation
+exception is thrown"
+         (let [f (CompletableFuture/supplyAsync
+                  (bound-fn [] (Thread/sleep 250) 1))]
+           (.cancel f true)
+           (is (thrown? CancellationException (wait f))))
+         (let [f (future (Thread/sleep 250) 1)]
+           (future-cancel f)
+           (is (thrown? CancellationException (wait f)))))
+  (testa ""
+         (let [p (blocking
+                   @(future
+                      (loop [i 0]
+                        (println i (cancelled?))
+                        (Thread/sleep 10)
+                        (if (or (cancelled?) (> i 10))
+                          :done
+                          (recur (inc i))))))]
+           (Thread/sleep 1)
+           (cancel! p)
+           (wait p)))
+  (comment
+    (wait* (CompletableFuture/supplyAsync
+            (fn [] (Thread/sleep 2000) (/ 1 0))))
+    (wait (async (async (future 123)))))
+  )
+
+
 (deftest async-tests
   (testa "Async is used to run some code asynchronously on the async-pool."
          (-> (async (+ 1 2))
@@ -399,7 +600,7 @@ it only for async control flow."
                (async (Thread/sleep 1000) i))
              (all)
              (handle q!))
-         (if @#'aimpl/executor-for
+         (if @#'impl/executor-for
            (is (= [0 1 2 3 4 5 6 7 8 9] (dq! 1100)))
            (is (= :timeout (dq! 1100)))))
 
@@ -1498,7 +1699,7 @@ happen where bindings are replaced by await or wait depending on their context."
                    (await (blocking (async a)))
                    (await (async (blocking a)))
                    (await (async (compute a)))
-                   (await (async a (blocking a (async a)))))))
+                   (await (async a (blocking a))))))
           q!)
          (is (= 15 (dq!)))
          (is (< 0 (dq!) 50))
