@@ -12,6 +12,7 @@
   bump-minor-version (clojure "-X:build bump-minor-version")
   bump-patch-version (clojure "-X:build bump-patch-version")
   release (do (run 'lint)
+              (run 'gen)
               (run 'test)
               (run 'install))
   publish {:requires ([clojure.edn :as edn])

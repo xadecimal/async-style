@@ -521,10 +521,12 @@ they should short-circuit as soon as they can.")
    (timeout chan ms (TimeoutException. (str "Channel timed out: " ms "ms."))))
   ([chan ms timed-out-value-or-fn]
    (async (let [deferred (defer ms ::timed-out)
-                res (first (a/alts! [chan deferred]))]
+                joined-chan (async (await* chan))
+                res (first (a/alts! [joined-chan deferred]))]
             (cond (= ::timed-out res)
                   (do
                     (cancel! chan)
+                    (cancel! joined-chan)
                     (if (fn? timed-out-value-or-fn)
                       (timed-out-value-or-fn)
                       timed-out-value-or-fn))
