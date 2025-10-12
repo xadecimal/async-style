@@ -99,13 +99,19 @@
 
 (defmacro await*
   "Parking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined."
+   taken result fully joined.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {}
   ([chan-or-value] ` (com.xadecimal.async-style.impl/await* ~chan-or-value)))
 
 (defn wait*
   "Blocking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined."
+   taken result fully joined.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn
              ([chan-or-value]
               `
@@ -156,7 +162,10 @@
               (println e))
             (catch Exception e
               (println \"Other unexpected excpetion\"))
-            (finally (println \"done\"))))"
+            (finally (println \"done\"))))
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {}
   ([chan-or-value & body]
    `
@@ -173,7 +182,10 @@
            (println e))
          (catch Exception e
            (println \"Other unexpected excpetion\"))
-         (finally (println \"done\")))"
+         (finally (println \"done\")))
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {}
   ([chan-or-value & body]
    `
@@ -188,7 +200,10 @@
 
    error-handler will run on the async-pool, so if you plan on doing something
    blocking or compute heavy, remember to wrap it in a blocking or compute
-   respectively."
+   respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn
              ([chan error-handler]
               `
@@ -210,7 +225,10 @@
    which means f is implied to be doing side-effect(s).
 
    f will run on the async-pool, so if you plan on doing something blocking or
-   compute heavy, remember to wrap it in a blocking or compute respectively."
+   compute heavy, remember to wrap it in a blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chan f] ` (com.xadecimal.async-style.impl/finally ~chan ~f)))}
   ([chan f] (com.xadecimal.async-style.impl/finally chan f)))
 
@@ -221,7 +239,10 @@
    Returns a promise-chan settled with the result of f or the error.
 
    f will run on the async-pool, so if you plan on doing something blocking or
-   compute heavy, remember to wrap it in a blocking or compute respectively."
+   compute heavy, remember to wrap it in a blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chan f] ` (com.xadecimal.async-style.impl/then ~chan ~f)))}
   ([chan f] (com.xadecimal.async-style.impl/then chan f)))
 
@@ -230,7 +251,10 @@
      (-> chan (then f1) (then f2) (then fs) ...)
 
    fs will all run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, remember to wrap it in a blocking or compute respectively."
+   or compute heavy, remember to wrap it in a blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn
              ([chan & fs] ` (com.xadecimal.async-style.impl/chain ~chan ~@fs)))}
   ([chan & fs]
@@ -249,7 +273,10 @@
 
    f, ok-handler and error-handler will all run on the async-pool, so if you
    plan on doing something blocking or compute heavy, remember to wrap it in a
-   blocking or compute respectively."
+   blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn
              ([chan f] ` (com.xadecimal.async-style.impl/handle ~chan ~f))
              ([chan ok-handler error-handler]
@@ -289,7 +316,10 @@
 
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
-   compute respectively."
+   compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn
              ([chan ms] ` (com.xadecimal.async-style.impl/timeout ~chan ~ms))
              ([chan ms timed-out-value-or-fn]
@@ -309,7 +339,10 @@
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
 
-   Once a chan fulfills, race cancels all the others."
+   Once a chan fulfills, race cancels all the others.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/race ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/race chans)))
 
@@ -324,7 +357,10 @@
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
 
-   Once a chan fulfills with an ok?, any cancels all the others."
+   Once a chan fulfills with an ok?, any cancels all the others.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/any ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/any chans)))
 
@@ -339,7 +375,10 @@
 
    In comparison, the promise-chan returned by all may be more appropriate if
    the tasks are dependent on each other / if you'd like to immediately stop upon
-   any of them returning an error?."
+   any of them returning an error?.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all-settled ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all-settled chans)))
 
@@ -350,7 +389,10 @@
    all of the input's chans have fulfilled, or if the input seqable contains no
    chans (only values or empty). It settles in error? immediately upon any of the
    input chans returning an error? or non-chans throwing an error?, and will
-   contain the error? of the first taken chan to return one."
+   contain the error? of the first taken chan to return one.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all chans)))
 
@@ -358,13 +400,19 @@
   "Asynchronous do. Execute expressions one after the other, awaiting the result
    of each one before moving on to the next. Results are lost to the void, same
    as clojure.core/do, so side effects are expected. Returns a promise-chan which
-   settles with the result of the last expression when the entire do! is done."
+   settles with the result of the last expression when the entire do! is done.
+
+   Note:
+    * exprs can return a channel or something supported by IntoPromiseChan."
   {}
   ([& exprs] ` (com.xadecimal.async-style.impl/ado ~@exprs)))
 
 (defmacro alet
   "Asynchronous let. Binds result of async expressions to local binding, executing
-   bindings in order one after the other."
+   bindings in order one after the other.
+
+   Note:
+    * exprs can return a channel or something supported by IntoPromiseChan."
   {}
   ([bindings & exprs]
    `
@@ -397,7 +445,10 @@
 (defmacro time
   "Evaluates expr and prints the time it took. Returns the value of expr. If
    expr evaluates to a channel, it waits for channel to fulfill before printing
-   the time it took."
+   the time it took.
+
+   Note:
+    * expr can return a channel or something supported by IntoPromiseChan."
   {}
   ([expr] ` (com.xadecimal.async-style.impl/time ~expr))
   ([expr print-fn] ` (com.xadecimal.async-style.impl/time ~expr ~print-fn)))

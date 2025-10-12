@@ -2,7 +2,7 @@
   (:refer-clojure :exclude [await time])
   (:require [clojure.core.async :as a]
             [clojure.core.async.impl.dispatch :as d]
-            [com.xadecimal.async-style.protocols :as proto :refer [->promise-chan]])
+            [com.xadecimal.async-style.protocols :refer [IntoPromiseChan ->promise-chan]])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
            [clojure.lang Agent IBlockingDeref]
            [java.util.concurrent CancellationException TimeoutException
@@ -15,6 +15,7 @@
 ;; TODO: Consider adding resolved, rejected and try, similar to the JS Promise APIs
 ;; TODO: Consider supporting await for... like in Python or JS
 ;; TODO: Consider if I should wrap the returned promise-chan in my own type, then I could have a proper cancel-chan and other stuff on it as well, instead of cramming all semantics on the promise-chan
+
 
 (def ^:private executor-for
   "the core.async 1.8+ executor-for var, nil if we're on an older version of
@@ -49,7 +50,7 @@
   []
   (CancellationException. "Operation was cancelled."))
 
-(defn- make-interrupted-exception
+(defn make-interrupted-exception
   []
   (InterruptedException. "Operation was interrupted."))
 
@@ -111,7 +112,7 @@
   [v]
   (instance? ManyToManyChannel v))
 
-(def ^:private ^:dynamic *cancellation-chan*)
+(def ^:dynamic *cancellation-chan*)
 (alter-meta! #'*cancellation-chan* assoc :doc
              "Used by the cancellation machinery, will be bound to a channel
 that will indicate if the current execution has been cancelled.
@@ -129,7 +130,8 @@ they should short-circuit as soon as they can.")
    in case someone tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
-  (if (or (some? (a/poll! *cancellation-chan*))
+  (if (or (when (bound? #'*cancellation-chan*)
+            (some? (a/poll! *cancellation-chan*)))
           (.isInterrupted (Thread/currentThread)))
     true
     false))
@@ -165,13 +167,13 @@ they should short-circuit as soon as they can.")
    It is up to processes inside async, blocking and compute blocks to properly
    check for cancellation on a channel."
   ([chan]
-   (when (chan? chan)
-     (settle! chan (make-cancellation-exception))))
+   (cancel! chan (make-cancellation-exception)))
   ([chan v]
    (when (nil? v)
      (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
-   (when (chan? chan)
-     (settle! chan v))))
+   (let [chan (->promise-chan chan)]
+     (when (chan? chan)
+       (settle! chan v)))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -277,7 +279,7 @@ they should short-circuit as soon as they can.")
   [& body]
   (async' body :compute))
 
-(extend-protocol proto/IntoPromiseChan
+(extend-protocol IntoPromiseChan
   nil
   (->promise-chan [this] this)
   ManyToManyChannel
@@ -302,21 +304,41 @@ they should short-circuit as soon as they can.")
 
 (defn- join'
   "Parking take from chan, but if result taken is still a chan?, further parking
-   take from it, repeating until first non chan? result and return it."
+   take from it, repeating until first non chan? result and return it.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan]
   (let [chan?- chan?]
     `(let [chan# (->promise-chan ~chan)]
        (if (~chan?- chan#)
-         (loop [res# (->promise-chan (a/<! chan#))]
+         (loop [res# (if (bound? #'*cancellation-chan*)
+                       (a/alt!
+                         *cancellation-chan*
+                         ([_#] (make-interrupted-exception))
+                         chan#
+                         ([v#] (->promise-chan v#))
+                         :priority true)
+                       (->promise-chan (a/<! chan#)))]
            (if (~chan?- res#)
-             (recur (->promise-chan (a/<! res#)))
+             (recur (if (bound? #'*cancellation-chan*)
+                      (a/alt!
+                        *cancellation-chan*
+                        ([_#] (make-interrupted-exception))
+                        res#
+                        ([v#] (->promise-chan v#))
+                        :priority true)
+                      (->promise-chan (a/<! res#))))
              res#))
          chan#))))
 
 (defn- <<!'
   "Wraps chan-or-value so that if chan it joins from it returning the joined
    result, else if value it returns value directly, or if chan-or-value throws it
-   returns the thrown exception."
+   returns the thrown exception.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value]
   (let [chan-or-value-gensym (gensym 'chan-or-value)]
     `(let [~chan-or-value-gensym (try ~chan-or-value
@@ -327,26 +349,45 @@ they should short-circuit as soon as they can.")
 
 (defmacro await*
   "Parking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined."
+   taken result fully joined.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value]
   (<<!' chan-or-value))
 
 (defn wait*
   "Blocking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined."
+   taken result fully joined.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value]
   (let [chan-or-value (->promise-chan chan-or-value)]
-    (if (chan? chan-or-value)
-      (loop [res (->promise-chan (a/<!! chan-or-value))]
-        (if (chan? res)
-          (recur (->promise-chan (a/<!! res)))
-          res))
-      chan-or-value)))
+    (letfn [(<!!-or-alt!!
+              [chan]
+              (if (bound? #'*cancellation-chan*)
+                (a/alt!!
+                  *cancellation-chan*
+                  ([_] (make-interrupted-exception))
+                  chan
+                  ([v] (->promise-chan v))
+                  :priority true)
+                (->promise-chan (a/<!! chan))))]
+      (if (chan? chan-or-value)
+        (loop [res (<!!-or-alt!! chan-or-value)]
+          (if (chan? res)
+            (recur (<!!-or-alt!! res))
+            res))
+        chan-or-value))))
 
 (defn- <<?'
   "Wraps chan-or-value so that if chan it joins from it returning the joined
    result, else if value it returns value directly, or if chan-or-value throws it
-   re-throws exception."
+   re-throws exception.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value]
   `(let [value-or-error# (await* ~chan-or-value)]
      (if (error? value-or-error#)
@@ -356,7 +397,10 @@ they should short-circuit as soon as they can.")
 (defn- <<??'
   "Wraps chan-or-value so that if chan it joins from it returning the joined
    result, else if value it returns value directly, or if chan-or-value throws it
-   re-throws exception."
+   re-throws exception.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value]
   `(let [value-or-error# (wait* ~chan-or-value)]
      (if (error? value-or-error#)
@@ -375,7 +419,10 @@ they should short-circuit as soon as they can.")
               (println e))
             (catch Exception e
               (println \"Other unexpected excpetion\"))
-            (finally (println \"done\"))))"
+            (finally (println \"done\"))))
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value & body]
   (first (implicit-try (cons (<<?' chan-or-value) body))))
 
@@ -390,7 +437,10 @@ they should short-circuit as soon as they can.")
            (println e))
          (catch Exception e
            (println \"Other unexpected excpetion\"))
-         (finally (println \"done\")))"
+         (finally (println \"done\")))
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value & body]
   (first (implicit-try (cons (<<??' chan-or-value) body))))
 
@@ -403,7 +453,10 @@ they should short-circuit as soon as they can.")
 
    error-handler will run on the async-pool, so if you plan on doing something
    blocking or compute heavy, remember to wrap it in a blocking or compute
-   respectively."
+   respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   ([chan error-handler]
    (async
      (let [v (await* chan)]
@@ -429,7 +482,10 @@ they should short-circuit as soon as they can.")
    which means f is implied to be doing side-effect(s).
 
    f will run on the async-pool, so if you plan on doing something blocking or
-   compute heavy, remember to wrap it in a blocking or compute respectively."
+   compute heavy, remember to wrap it in a blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan f]
   (async
     (let [res (await* chan)]
@@ -443,7 +499,10 @@ they should short-circuit as soon as they can.")
    Returns a promise-chan settled with the result of f or the error.
 
    f will run on the async-pool, so if you plan on doing something blocking or
-   compute heavy, remember to wrap it in a blocking or compute respectively."
+   compute heavy, remember to wrap it in a blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan f]
   (async
     (let [v (await* chan)]
@@ -456,7 +515,10 @@ they should short-circuit as soon as they can.")
      (-> chan (then f1) (then f2) (then fs) ...)
 
    fs will all run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, remember to wrap it in a blocking or compute respectively."
+   or compute heavy, remember to wrap it in a blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chan & fs]
   (reduce
    (fn [chan f] (then chan f))
@@ -475,7 +537,10 @@ they should short-circuit as soon as they can.")
 
    f, ok-handler and error-handler will all run on the async-pool, so if you
    plan on doing something blocking or compute heavy, remember to wrap it in a
-   blocking or compute respectively."
+   blocking or compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   ([chan f]
    (async
      (let [v (await* chan)]
@@ -491,7 +556,12 @@ they should short-circuit as soon as they can.")
   "Asynchronously sleep ms time, returns a promise-chan which settles after ms
    time."
   [ms]
-  (async (a/<! (a/timeout ms))))
+  (async (a/alt!
+           *cancellation-chan*
+           ([_] (make-interrupted-exception))
+           (a/timeout ms)
+           ([v] v)
+           :priority true)))
 
 (defn defer
   "Waits ms time and then asynchronously executes value-or-fn, returning a
@@ -501,7 +571,12 @@ they should short-circuit as soon as they can.")
    blocking or compute heavy, remember to wrap it in a blocking or compute
    respectively."
   [ms value-or-fn]
-  (async (a/<! (a/timeout ms))
+  (async (a/alt!
+           *cancellation-chan*
+           ([_] (make-interrupted-exception))
+           (a/timeout ms)
+           ([v] v)
+           :priority true)
          (when-not (cancelled?)
            (if (fn? value-or-fn)
              (value-or-fn)
@@ -516,11 +591,15 @@ they should short-circuit as soon as they can.")
 
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
-   compute respectively."
+   compute respectively.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   ([chan ms]
    (timeout chan ms (TimeoutException. (str "Channel timed out: " ms "ms."))))
   ([chan ms timed-out-value-or-fn]
-   (async (let [deferred (defer ms ::timed-out)
+   (async (let [chan (->promise-chan chan)
+                deferred (defer ms ::timed-out)
                 joined-chan (async (await* chan))
                 res (first (a/alts! [joined-chan deferred]))]
             (cond (= ::timed-out res)
@@ -542,15 +621,19 @@ they should short-circuit as soon as they can.")
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
 
-   Once a chan fulfills, race cancels all the others."
+   Once a chan fulfills, race cancels all the others.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (let [ret (a/promise-chan)]
     (if (seq chans)
-      (doseq [chan chans]
-        (a/go
-          (let [res (await* chan)]
-            (and (settle! ret res)
-                 (run! #(when-not (= chan %) (cancel! %)) chans)))))
+      (let [chans (mapv ->promise-chan chans)]
+        (doseq [chan chans]
+          (a/go
+            (let [res (await* chan)]
+              (and (settle! ret res)
+                   (run! #(when-not (= chan %) (cancel! %)) chans))))))
       (settle! ret nil))
     ret))
 
@@ -565,12 +648,15 @@ they should short-circuit as soon as they can.")
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
 
-   Once a chan fulfills with an ok?, any cancels all the others."
+   Once a chan fulfills with an ok?, any cancels all the others.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (let [ret (a/promise-chan)
         attempt-chans (volatile! [])]
     (if (seq chans)
-      (do
+      (let [chans (mapv ->promise-chan chans)]
         (doseq [chan chans]
           (vswap! attempt-chans
                   conj
@@ -602,7 +688,10 @@ they should short-circuit as soon as they can.")
 
    In comparison, the promise-chan returned by all may be more appropriate if
    the tasks are dependent on each other / if you'd like to immediately stop upon
-   any of them returning an error?."
+   any of them returning an error?.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (async
     (loop [res [] chan (first chans) chans (next chans)]
@@ -619,12 +708,15 @@ they should short-circuit as soon as they can.")
    all of the input's chans have fulfilled, or if the input seqable contains no
    chans (only values or empty). It settles in error? immediately upon any of the
    input chans returning an error? or non-chans throwing an error?, and will
-   contain the error? of the first taken chan to return one."
+   contain the error? of the first taken chan to return one.
+
+   Note:
+    * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (let [ret (a/promise-chan)
         res-chans (volatile! [])]
     (if (seq chans)
-      (do
+      (let [chans (mapv ->promise-chan chans)]
         (doseq [chan chans]
           (vswap! res-chans
                   conj
@@ -646,14 +738,20 @@ they should short-circuit as soon as they can.")
   "Asynchronous do. Execute expressions one after the other, awaiting the result
    of each one before moving on to the next. Results are lost to the void, same
    as clojure.core/do, so side effects are expected. Returns a promise-chan which
-   settles with the result of the last expression when the entire do! is done."
+   settles with the result of the last expression when the entire do! is done.
+
+   Note:
+    * exprs can return a channel or something supported by IntoPromiseChan."
   [& exprs]
   `(async
      ~@(map #(list `await %) exprs)))
 
 (defmacro alet
   "Asynchronous let. Binds result of async expressions to local binding, executing
-   bindings in order one after the other."
+   bindings in order one after the other.
+
+   Note:
+    * exprs can return a channel or something supported by IntoPromiseChan."
   [bindings & exprs]
   `(async
      (clojure.core/let
@@ -754,7 +852,10 @@ they should short-circuit as soon as they can.")
 (defmacro time
   "Evaluates expr and prints the time it took. Returns the value of expr. If
    expr evaluates to a channel, it waits for channel to fulfill before printing
-   the time it took."
+   the time it took.
+
+   Note:
+    * expr can return a channel or something supported by IntoPromiseChan."
   ([expr]
    `(time ~expr (fn [time-ms#] (prn (str "Elapsed time: " time-ms# " msecs")))))
   ([expr print-fn]
@@ -763,7 +864,7 @@ they should short-circuit as soon as they can.")
             prn-time-fn# (fn prn-time-fn#
                            ([~'_] (prn-time-fn#))
                            ([] (~print-fn (/ (double (- (System/nanoTime) start#)) 1000000.0))))
-            ret# ~expr]
+            ret# ~(->promise-chan expr)]
         (if (~chan?- ret#)
           (-> ret# (handle prn-time-fn#))
           (prn-time-fn#))

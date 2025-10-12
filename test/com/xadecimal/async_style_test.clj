@@ -528,24 +528,7 @@ exception is thrown"
            (is (thrown? CancellationException (wait f))))
          (let [f (future (Thread/sleep 250) 1)]
            (future-cancel f)
-           (is (thrown? CancellationException (wait f)))))
-  (comment
-    (testa ""
-           (let [p (blocking
-                     @(future
-                        (loop [i 0]
-                          (println i (cancelled?))
-                          (Thread/sleep 10)
-                          (if (or (cancelled?) (> i 10))
-                            :done
-                            (recur (inc i))))))]
-             (Thread/sleep 1)
-             (cancel! p)
-             (wait p)))
-    (wait* (CompletableFuture/supplyAsync
-            (fn [] (Thread/sleep 2000) (/ 1 0))))
-    (wait (async (async (future 123)))))
-  )
+           (is (thrown? CancellationException (wait f))))))
 
 
 (deftest async-tests
@@ -1769,6 +1752,7 @@ wrap it with time. By default it prints to stdout."
 times and not nil."
          (is (= 3 (time (+ 1 2))))))
 
+
 (defn make-future
   [value]
   (future
@@ -1911,29 +1895,68 @@ times and not nil."
 
 (comment
   ;; Await*
+  (wait (async (await* (future 100))))
+  (wait (async (await* (future (/ 1 0)))))
+  (wait (async (await* (future (/ 1 0))) 10))
   (wait (async (await* (future (Thread/sleep 1000) 10))))
+  (let [fp (async (await* (future (Thread/sleep 1000) (println 10))))]
+    (defer 500 #(cancel! fp))
+    (wait fp))
+  (let [fp (async (await (sleep 1000)) (println 10))]
+    (defer 500 #(cancel! fp))
+    (wait fp))
   ;; Await
+  (wait (async (await (future 100))))
+  (wait (async (await (future (/ 1 0)))))
+  (wait (async (await (future (/ 1 0))) 10))
   (wait (async (await (future (Thread/sleep 1000) 10))))
+  (let [fp (->promise-chan (future (Thread/sleep 1000) 10))]
+    (defer 500 #(cancel! fp))
+    (wait (async (await fp))))
   ;; Wait*
+  (wait* (future 100))
+  (wait* (future (/ 1 0)))
   (wait (blocking (wait* (future (Thread/sleep 1000) 10))))
   ;; Wait
+  (wait (future 100))
+  (wait (future (/ 1 0)))
   (wait (blocking (wait (future (Thread/sleep 1000) 10))))
   ;; Async
+  (clojure.core.async/<!!
+   (async (future (Thread/sleep 1000) 10)))
   (wait (async (future (Thread/sleep 1000) 10)))
   ;; Blocking
+  (clojure.core.async/<!!
+   (blocking (future (Thread/sleep 1000) 10)))
   (wait (blocking (future (Thread/sleep 1000) 10)))
   ;; Compute
+  (clojure.core.async/<!!
+   (compute (future (Thread/sleep 1000) 10)))
   (wait (compute (future (Thread/sleep 1000) 10)))
   ;; Catch
+  (clojure.core.async/<!!
+   (catch (future (Thread/sleep 1000) (/ 1 0))
+       ArithmeticException (fn [err] (str err))))
   (wait (catch (future (Thread/sleep 1000) (/ 1 0))
             ArithmeticException (fn [err] (str err))))
   ;; Finally
+  (clojure.core.async/<!!
+   (finally (future (Thread/sleep 1000) (/ 1 0))
+            (fn [err] (println "Errored:" (str err)))))
   (wait (finally (future (Thread/sleep 1000) (/ 1 0))
                  (fn [err] (println "Errored:" (str err)))))
   ;; Then
+  (clojure.core.async/<!!
+   (then (future (Thread/sleep 1000) 10)
+         inc))
   (wait (then (future (Thread/sleep 1000) 10)
               inc))
   ;; Chain
+  (clojure.core.async/<!!
+   (chain (future (Thread/sleep 1000) 10)
+          inc
+          (fn [x] (future (inc x)))
+          #(* 2 %)))
   (wait (chain (future (Thread/sleep 1000) 10)
                inc
                (fn [x] (future (inc x)))
@@ -1956,13 +1979,61 @@ times and not nil."
   ;; Sleep
   ;; Does not make sense outside of promise-chan, no need to test with future
   ;; Defer
+  (clojure.core.async/<!! (defer 1000 (future 10)))
   (wait (defer 1000 (future (Thread/sleep 1000) 10)))
   (wait (defer 1000 (fn [] (future (Thread/sleep 1000) 10))))
   ;; Timeout
+  (wait (timeout (future (Thread/sleep 100) 10) 20))
+  (wait (timeout (future (Thread/sleep 100) 10) 200))
+  (clojure.core.async/<!! (timeout (future (Thread/sleep 100) 10) 20))
+  (clojure.core.async/<!! (timeout (future (Thread/sleep 100) 10) 200))
   (wait (timeout (future (Thread/sleep 1000) (println "cancelled") 10) 100))
+  (wait (timeout (->promise-chan (future (Thread/sleep 1000) (println "cancelled") 10)) 100))
+  (wait (timeout (future (Thread/sleep 1000) 10) 100))
   (wait (timeout 10 100))
-  (wait (cancelled? (future (Thread/sleep 1000) 10)))
-  (wait (check-cancelled! (future (Thread/sleep 1000) 10)))
+  (wait (timeout (future
+                   (try (Thread/sleep 100)
+                        (println :not-interrupted)
+                        (catch InterruptedException e
+                          (println :interrupted))))
+                 10))
+  ;; Cancelled
+  (let [f (blocking (wait (future
+                            (Thread/sleep 100)
+                            (if (cancelled?)
+                              (println :cancelled)
+                              (println :not-cancelled)))))]
+    (defer 10 #(cancel! f)))
+  ;; Check Cancelled
+  (let [f (future (dotimes [i 10000000]
+                    (check-cancelled!)
+                    (Math/sqrt (+ i 123456789.0)))
+                  :done)]
+    (cancel! f)
+    @f)
+  (let [f (future
+            (Thread/sleep 100)
+            :done)]
+    (cancel! f)
+    @f)
+  (let [f (future
+            (Thread/sleep 1000)
+            :done)
+        pc (->promise-chan f)]
+    (cancel! pc)
+    @f)
+  (let [f (future
+            (Thread/sleep 1000)
+            :done)]
+    (cancel! f)
+    @f)
+  (let [f (blocking (wait (future
+                            (Thread/sleep 100)
+                            (check-cancelled!)
+                            (println :not-cancelled))))]
+    (defer 10 #(cancel! f))
+    (wait f))
+  ;; Cancel
   (wait (cancel! (future (Thread/sleep 1000) 10)))
   (wait (race (future (Thread/sleep 1000) 10)))
   (wait (any (future (Thread/sleep 1000) 10)))
