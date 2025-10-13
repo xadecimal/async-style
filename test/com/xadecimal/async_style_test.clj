@@ -57,8 +57,13 @@ cancelled? inside your async blocks."
            (is (instance? CancellationException (dq!)))
            (is (> 5050 @result))))
 
-  (testa "When used outside an async block, it throws."
-         (is (thrown? IllegalArgumentException (cancelled?))))
+  (testa "When used outside an async block, it returns false."
+         (is (= false (cancelled?))))
+
+  (testa "Or the value of the thread's interrupt flag."
+         (let [f (future (.interrupt (Thread/currentThread))
+                         (cancelled?))]
+           (is (= true @f))))
 
   (testa "Returns true if cancelled."
          (let [promise-chan (async (Thread/sleep 60)
@@ -98,8 +103,15 @@ it using check-cancelled! inside your async blocks."
            (is (instance? CancellationException (dq!)))
            (is (> 5050 @result))))
 
-  (testa "When used outside an async block, it throws."
-         (is (thrown? IllegalArgumentException (check-cancelled!))))
+  (testa "When used outside an async block, it returns nil."
+         (is (= nil (check-cancelled!))))
+
+  (testa "Or if the thread interrupt flag is set it throws InterruptedException."
+         (let [f (future (.interrupt (Thread/currentThread))
+                         (check-cancelled!))]
+           (is (instance? InterruptedException (try @f
+                                                    (catch Exception e
+                                                      (.getCause e)))))))
 
   (testa "Throws InterruptedException if cancelled."
          (let [promise-chan (async (Thread/sleep 60)
@@ -1776,32 +1788,32 @@ times and not nil."
            (-> (catch fut ArithmeticException (fn [_] :caught))
                (handle q!)))
          (is (= :caught (dq!))))
-  
+
   (testa "finally should work with Future - already has auto-coercion via await*"
          (let [fut (make-future 42)]
            (-> (finally fut (fn [_] (q! :finally-called)))
                (handle q!)))
          (is (= :finally-called (dq!)))
          (is (= 42 (dq!))))
-  
+
   (testa "then should work with Future - already has auto-coercion via await*"
          (let [fut (make-future 10)]
            (-> (then fut #(* % 2))
                (handle q!)))
          (is (= 20 (dq!))))
-  
+
   (testa "handle should work with Future - already has auto-coercion via await*"
          (let [fut (make-future 15)]
            (-> (handle fut #(+ % 5))
                (handle q!)))
          (is (= 20 (dq!))))
-  
+
   (testa "chain should work with Future - already has auto-coercion via then"
          (let [fut (make-future 5)]
            (-> (chain fut inc #(* % 2) dec)
                (handle q!)))
          (is (= 11 (dq!))))
-  
+
   ;; Functions that should FAIL (missing auto-coercion)
   (testa "cancel! should fail with Future - missing auto-coercion"
          (let [fut (make-future 42)]
@@ -1813,7 +1825,7 @@ times and not nil."
          ;; This test expects failure due to missing coercion
          ;; The Future won't be recognized as a channel
          (is (= :no-error (dq!)))) ; This assertion will fail, proving missing coercion
-  
+
   (testa "timeout should fail with Future - missing auto-coercion"
          (let [fut (make-future 42)]
            (try
@@ -1824,7 +1836,7 @@ times and not nil."
                (q! :error-caught))))
          ;; This should fail because timeout tries to use Future directly with alts!
          (is (not= :error-caught (dq!)))) ; This assertion will fail, proving missing coercion
-  
+
   (testa "race should fail with Future collection - missing auto-coercion"
          (let [fut1 (make-future 10)
                fut2 (make-future 20)]
@@ -1836,7 +1848,7 @@ times and not nil."
                (q! :error-caught))))
          ;; This should fail because race doesn't coerce the futures in the collection
          (is (not= :error-caught (dq!)))) ; This assertion will fail, proving missing coercion
-  
+
   (testa "any should fail with Future collection - missing auto-coercion"
          (let [fut1 (make-error-future (RuntimeException. "error1"))
                fut2 (make-future 20)]
@@ -1848,7 +1860,7 @@ times and not nil."
                (q! :error-caught))))
          ;; This should fail because any doesn't coerce the futures in the collection
          (is (not= :error-caught (dq!)))) ; This assertion will fail, proving missing coercion
-  
+
   (testa "all should fail with Future collection - missing auto-coercion"
          (let [fut1 (make-future 10)
                fut2 (make-future 20)]
@@ -1860,7 +1872,7 @@ times and not nil."
                (q! :error-caught))))
          ;; This should fail because all doesn't coerce the futures in the collection
          (is (not= :error-caught (dq!)))) ; This assertion will fail, proving missing coercion
-  
+
   (testa "all-settled should fail with Future collection - missing auto-coercion"
          (let [fut1 (make-future 10)
                fut2 (make-error-future (RuntimeException. "error"))]
@@ -1873,14 +1885,14 @@ times and not nil."
                (q! :error-caught))))
          ;; This should fail because all-settled doesn't coerce the futures in the collection
          (is (not= :error-caught (dq!)))) ; This assertion will fail, proving missing coercion
-  
+
   ;; Additional edge case tests
   (testa "CompletableFuture should also work where auto-coercion exists"
          (let [cf (CompletableFuture/completedFuture 99)]
            (-> (then cf inc)
                (handle q!)))
          (is (= 100 (dq!))))
-  
+
   (testa "Mixed Future and promise-chan in race should fail - missing coercion"
          (let [fut (make-future 10)
                chan (async 20)]
@@ -1899,6 +1911,15 @@ times and not nil."
   (wait (async (await* (future (/ 1 0)))))
   (wait (async (await* (future (/ 1 0))) 10))
   (wait (async (await* (future (Thread/sleep 1000) 10))))
+  (let [p (blocking (println "executing")
+                    (Thread/sleep 1000)
+                    (println "done")
+                    :done
+                    (catch InterruptedException e
+                      (println "interrupted")))]
+    (cancel! p)
+    (defer 500 #(cancel! p))
+    (wait p))
   (let [fp (async (await* (future (Thread/sleep 1000) (println 10))))]
     (defer 500 #(cancel! fp))
     (wait fp))

@@ -7,7 +7,8 @@
            [clojure.lang Agent IBlockingDeref]
            [java.util.concurrent CancellationException TimeoutException
             ThreadPoolExecutor CompletableFuture Future ExecutionException]
-           [java.util.concurrent.locks ReentrantLock]))
+           [java.util.concurrent.locks ReentrantLock]
+           [java.util WeakHashMap]))
 
 
 ;; TODO: add support for CSP style, maybe a process-factory that creates processes with ins/outs channels of buffer 1 and connectors between them
@@ -44,6 +45,9 @@
     (@executor-for :core-async-dispatch)
     ;; Used by a/go
     @d/executor))
+
+(def ^WeakHashMap interrupter-callbacks
+  (WeakHashMap.))
 
 
 (defn- make-cancellation-exception
@@ -173,7 +177,11 @@ they should short-circuit as soon as they can.")
      (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
    (let [chan (->promise-chan chan)]
      (when (chan? chan)
-       (settle! chan v)))))
+       (when (settle! chan v)
+         ;; Execute interrupt callback and cleanup interrupter
+         (let [callback (locking interrupter-callbacks
+                          (.remove interrupter-callbacks chan))]
+           (when callback (callback))))))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -226,16 +234,17 @@ they should short-circuit as soon as they can.")
       `(let [ret# (a/promise-chan)
              interrupter-thread# (volatile! nil)
              interrupt-lock# (ReentrantLock.)
-             interrupter# (a/go
-                            (when (some? (a/<! ret#))
-                              (with-lock interrupt-lock#
-                                (when-some [^Thread t# @interrupter-thread#]
-                                  (.interrupt t#)))))]
+             interrupter# (fn []
+                            (with-lock interrupt-lock#
+                              (when-some [^Thread t# @interrupter-thread#]
+                                (.interrupt t#))))]
          (~(case execution-type
              :blocking (if executor-for `a/io-thread `a/thread)
              :compute `compute')
-          (vreset! interrupter-thread# (Thread/currentThread))
           (try
+            (vreset! interrupter-thread# (Thread/currentThread))
+            (locking interrupter-callbacks
+              (.put interrupter-callbacks ret# interrupter#))
             (binding [*cancellation-chan* ret#]
               (when-not (cancelled?)
                 (~settle- ret#
@@ -243,6 +252,8 @@ they should short-circuit as soon as they can.")
                       (catch Throwable t#
                         t#)))))
             (finally
+              (locking interrupter-callbacks
+                (.remove interrupter-callbacks ret#))
               (with-lock interrupt-lock#
                 (vreset! interrupter-thread# nil)))))
          ret#))))
