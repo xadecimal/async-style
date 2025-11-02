@@ -179,9 +179,11 @@ they should short-circuit as soon as they can.")
      (when (chan? chan)
        (when (settle! chan v)
          ;; Execute interrupt callback and cleanup interrupter
-         (let [callback (locking interrupter-callbacks
-                          (.remove interrupter-callbacks chan))]
-           (when callback (callback))))))))
+         (let [callbacks (locking interrupter-callbacks
+                           (.remove interrupter-callbacks chan))]
+           (when callbacks
+             (doseq [callback @callbacks]
+               (callback)))))))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -238,13 +240,13 @@ they should short-circuit as soon as they can.")
                             (with-lock interrupt-lock#
                               (when-some [^Thread t# @interrupter-thread#]
                                 (.interrupt t#))))]
+         (locking interrupter-callbacks
+           (.put interrupter-callbacks ret# (atom #{interrupter#})))
          (~(case execution-type
              :blocking (if executor-for `a/io-thread `a/thread)
              :compute `compute')
           (try
             (vreset! interrupter-thread# (Thread/currentThread))
-            (locking interrupter-callbacks
-              (.put interrupter-callbacks ret# interrupter#))
             (binding [*cancellation-chan* ret#]
               (when-not (cancelled?)
                 (~settle- ret#
@@ -252,10 +254,10 @@ they should short-circuit as soon as they can.")
                       (catch Throwable t#
                         t#)))))
             (finally
-              (locking interrupter-callbacks
-                (.remove interrupter-callbacks ret#))
               (with-lock interrupt-lock#
-                (vreset! interrupter-thread# nil)))))
+                (vreset! interrupter-thread# nil))
+              (locking interrupter-callbacks
+                (.remove interrupter-callbacks ret#)))))
          ret#))))
 
 (defmacro async
@@ -297,19 +299,25 @@ they should short-circuit as soon as they can.")
   (->promise-chan [this] this)
   IBlockingDeref
   (->promise-chan [this]
-    (blocking @this
-              (catch InterruptedException _
-                (when (instance? Future this)
-                  (future-cancel this)))
-              (catch ExecutionException e
-                (throw (.getCause e)))))
+    (let [pc (blocking @this
+                       (catch ExecutionException e
+                         (throw (.getCause e))))
+          callbacks (locking interrupter-callbacks
+                      (.get interrupter-callbacks pc))]
+      (when callbacks
+        (when (instance? Future this)
+          (swap! callbacks conj (fn [] (future-cancel this)))))
+      pc))
   CompletableFuture
   (->promise-chan [this]
-    (blocking @this
-              (catch InterruptedException _
-                (.cancel this true))
-              (catch ExecutionException e
-                (throw (.getCause e)))))
+    (let [pc (blocking @this
+                       (catch ExecutionException e
+                         (throw (.getCause e))))
+          callbacks (locking interrupter-callbacks
+                      (.get interrupter-callbacks pc))]
+      (when callbacks
+        (swap! callbacks conj (fn [] (.cancel this true))))
+      pc))
   Object
   (->promise-chan [this] this))
 

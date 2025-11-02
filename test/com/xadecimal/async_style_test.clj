@@ -742,7 +742,7 @@ with try/catch/finally. It's similar to if you always wrapped the inside in a tr
 
   (testa "Blocking block can be cancelled, they will skip their execution if cancelled
 before they begin executing."
-         (cancel! (blocking (q! :will-timeout-due-to-cancel)))
+         (cancel! (blocking (Thread/sleep 1) (q! :will-timeout-due-to-cancel)))
          (is (= :timeout (dq!))))
 
   (testa "If you plan on doing lots of work, and want to support it being cancellable,
@@ -1911,12 +1911,15 @@ times and not nil."
   (wait (async (await* (future (/ 1 0)))))
   (wait (async (await* (future (/ 1 0))) 10))
   (wait (async (await* (future (Thread/sleep 1000) 10))))
-  (let [p (blocking (println "executing")
-                    (Thread/sleep 1000)
-                    (println "done")
-                    :done
-                    (catch InterruptedException e
-                      (println "interrupted")))]
+  (let [p (->promise-chan
+           (future
+             (try
+               (println "executing")
+               (Thread/sleep 1000)
+               (println "done")
+               :done
+               (catch InterruptedException e
+                 (println "interrupted")))))]
     (cancel! p)
     (defer 500 #(cancel! p))
     (wait p))
