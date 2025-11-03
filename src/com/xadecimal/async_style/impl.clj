@@ -606,8 +606,6 @@ they should short-circuit as soon as they can.")
    with the result, else returns a promise-chan settled with a TimeoutException
    or the result of timed-out-value-or-fn.
 
-   In the case of a timeout, chan will be cancelled.
-
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
    compute respectively.
@@ -623,7 +621,6 @@ they should short-circuit as soon as they can.")
                 res (first (a/alts! [joined-chan deferred]))]
             (cond (= ::timed-out res)
                   (do
-                    (cancel! chan)
                     (cancel! joined-chan)
                     (if (fn? timed-out-value-or-fn)
                       (timed-out-value-or-fn)
@@ -640,8 +637,6 @@ they should short-circuit as soon as they can.")
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
 
-   Once a chan fulfills, race cancels all the others.
-
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
@@ -651,8 +646,7 @@ they should short-circuit as soon as they can.")
         (doseq [chan chans]
           (a/go
             (let [res (await* chan)]
-              (and (settle! ret res)
-                   (run! #(when-not (= chan %) (cancel! %)) chans))))))
+              (settle! ret res)))))
       (settle! ret nil))
     ret))
 
@@ -666,8 +660,6 @@ they should short-circuit as soon as they can.")
 
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
-
-   Once a chan fulfills with an ok?, any cancels all the others.
 
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -683,8 +675,7 @@ they should short-circuit as soon as they can.")
                     (let [v (await* chan)]
                       (if (error? v)
                         v
-                        (and (settle! ret v)
-                             (run! #(when-not (= chan %) (cancel! %)) chans)))))))
+                        (settle! ret v))))))
         (a/go
           (let [errors (a/<! (a/map vector @attempt-chans))]
             (when (every? error? errors)
@@ -742,8 +733,7 @@ they should short-circuit as soon as they can.")
                   (a/go
                     (let [v (await* chan)]
                       (if (error? v)
-                        (do (and (settle! ret v)
-                                 (run! #(when-not (= chan %) (cancel! %)) chans))
+                        (do (settle! ret v)
                             v)
                         v)))))
         (a/go
