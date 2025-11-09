@@ -1326,46 +1326,53 @@ choosing on timeout instead."
                   (-> (race [1 2 3 4 5 6 7 8 9 (async 10)])
                       (wait))))))))
 
-  (testa "Race cancels all other chans once one of them fulfills."
+  (testa "Race does not cancel losing chans once one of them fulfills, they
+   all keep running to completion."
          (-> (race [(blocking
                       (Thread/sleep 100)
+                      (q! :done)
                       (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
+                      (q! :done)
                       (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
+                      (q! :done)
                       (catch InterruptedException _
                         (q! :cancelled)))
                     (async :done)])
              (handle q!))
          (is (= :done (dq!)))
-         (is (= :cancelled (dq!)))
-         (is (= :cancelled (dq!)))
-         (is (= :cancelled (dq!))))
+         (is (= :done (dq!)))
+         (is (= :done (dq!)))
+         (is (= :done (dq!))))
 
-  (testa "Even if the first one to fulfill did so with an error, others are
-   still cancelled."
+  (testa "Even if the first one to fulfill did so with an error, others still
+   continue running."
          (-> (race [(blocking
                       (Thread/sleep 100)
+                      (q! :done)
                       (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
+                      (q! :done)
                       (catch InterruptedException _
                         (q! :cancelled)))
                     (blocking
                       (Thread/sleep 100)
+                      (q! :done)
                       (catch InterruptedException _
                         (q! :cancelled)))
                     (async (throw (ex-info "error" {})))])
              (handle q!))
          (is (error? (dq!)))
-         (is (= :cancelled (dq!)))
-         (is (= :cancelled (dq!)))
-         (is (= :cancelled (dq!)))))
+         (is (= :done (dq!)))
+         (is (= :done (dq!)))
+         (is (= :done (dq!)))))
 
 
 (deftest any-tests
@@ -1415,17 +1422,20 @@ choosing on timeout instead."
                   (-> (any [1 2 3 4 5 6 7 8 9 (async 10)])
                       (wait))))))))
 
-  (testa "Any cancels all other chans once one of them fulfills in ok?."
+  (testa "Any won't cancel the loser chans once one of them fulfills in ok?."
          (-> (any [(blocking
                      (Thread/sleep 100)
+                     (q! :done)
                      (catch InterruptedException _
                        (q! :cancelled)))
                    (blocking
                      (Thread/sleep 100)
+                     (q! :done)
                      (catch InterruptedException _
                        (q! :cancelled)))
                    (blocking
                      (Thread/sleep 100)
+                     (q! :done)
                      (catch InterruptedException _
                        (q! :cancelled)))
                    (defer 30 :done)
@@ -1433,13 +1443,13 @@ choosing on timeout instead."
              (handle q!))
          (is (= :throwed (dq!)))
          (is (= :done (dq!)))
-         (is (= :cancelled (dq!)))
-         (is (= :cancelled (dq!)))
-         (is (= :cancelled (dq!))))
+         (is (= :done (dq!)))
+         (is (= :done (dq!)))
+         (is (= :done (dq!))))
 
-  (testa "If the first one to fulfill did so with an error, others are
-   not cancelled. But as soon as any of the other fulfill, the remaining
-   ones will cancel."
+  (testa "If the first one to fulfill did so with an error, other losers
+   won't be cancelled. Even after any of the other fulfill, the remaining
+   ones will keep running without being cancelled."
          (-> (any [(blocking
                      (Thread/sleep 30)
                      (q! :not-cancelled)
@@ -1454,7 +1464,7 @@ choosing on timeout instead."
              (handle q!))
          (is (= :not-cancelled (dq!)))
          (is (= :not-cancelled (dq!)))
-         (is (= :cancelled (dq!)))))
+         (is (= :not-cancelled (dq!)))))
 
 
 (deftest all-settled-tests
@@ -1922,6 +1932,12 @@ times and not nil."
                  (println "interrupted")))))]
     (cancel! p)
     (defer 500 #(cancel! p))
+    (wait p))
+  (let [p (async
+            (let [p (async (await (sleep 1000)) (println :p-done) :p-done)
+                  p2 (async (await (sleep 1000)) (println :p2-done) :p2-done)]
+              (all-settled [p p2])))]
+    (cancel! p :foo)
     (wait p))
   (let [fp (async (await* (future (Thread/sleep 1000) (println 10))))]
     (defer 500 #(cancel! fp))

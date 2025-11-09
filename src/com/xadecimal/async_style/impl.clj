@@ -46,7 +46,7 @@
     ;; Used by a/go
     @d/executor))
 
-(def ^WeakHashMap interrupter-callbacks
+(def ^WeakHashMap cancellation-callbacks
   (WeakHashMap.))
 
 
@@ -125,6 +125,30 @@ blocking or compute to check this channel using cancelled? to
 see if someone tried to cancel their execution, in which case
 they should short-circuit as soon as they can.")
 
+(defn cancellation-chan-bound?
+  "Returns true if *cancellation-chan* is bound and non-shielded,
+   false otherwise."
+  []
+  (and (bound? #'*cancellation-chan*) (not= *cancellation-chan* ::shielded)))
+
+(defmacro shield
+  "Shields body from parent cancellation context, preventing parent-child
+   relationship registration.
+
+   Use when spawning tasks that should not be cancelled when the parent is
+   cancelled (fire-and-forget, background work, etc.):
+
+     (async
+       (let [background (shield (async ...))]  ; won't be cancelled with parent
+         ...))
+
+   Can also be used around await*/wait* to prevent reading parent's cancellation
+   channel while maintaining parent-child relationship (rare, mainly for internal
+   use in combinators)."
+  [& body]
+  `(binding [*cancellation-chan* ::shielded]
+     ~@body))
+
 (defn cancelled?
   "Returns true if execution context was cancelled and thus should be
    interrupted/short-circuited, false otherwise.
@@ -134,7 +158,7 @@ they should short-circuit as soon as they can.")
    in case someone tried to cancel their execution, in which case they should
    interrupt/short-circuit the work as soon as they can."
   []
-  (if (or (when (bound? #'*cancellation-chan*)
+  (if (or (when (cancellation-chan-bound?)
             (some? (a/poll! *cancellation-chan*)))
           (.isInterrupted (Thread/currentThread)))
     true
@@ -177,13 +201,15 @@ they should short-circuit as soon as they can.")
      (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
    (let [chan (->promise-chan chan)]
      (when (chan? chan)
-       (when (settle! chan v)
-         ;; Execute interrupt callback and cleanup interrupter
-         (let [callbacks (locking interrupter-callbacks
-                           (.remove interrupter-callbacks chan))]
-           (when callbacks
-             (doseq [callback @callbacks]
-               (callback)))))))))
+       (let [cancelled (settle! chan v)]
+         (when cancelled
+           ;; Execute cancellation callbacks (thread interrupters, child cancellers, etc.)
+           (let [callbacks (locking cancellation-callbacks
+                             (.remove cancellation-callbacks chan))]
+             (when callbacks
+               (doseq [callback @callbacks]
+                 (callback)))))
+         cancelled)))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -239,9 +265,15 @@ they should short-circuit as soon as they can.")
              interrupter# (fn []
                             (with-lock interrupt-lock#
                               (when-some [^Thread t# @interrupter-thread#]
-                                (.interrupt t#))))]
-         (locking interrupter-callbacks
-           (.put interrupter-callbacks ret# (atom #{interrupter#})))
+                                (.interrupt t#))))
+             parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
+         (locking cancellation-callbacks
+           (.put cancellation-callbacks ret# (atom #{interrupter#}))
+           (when parent#
+             (let [callbacks# (or (.get cancellation-callbacks parent#)
+                                  (atom #{}))]
+               (.put cancellation-callbacks parent# callbacks#)
+               (swap! callbacks# conj (fn [] (cancel! ret#))))))
          (~(case execution-type
              :blocking (if executor-for `a/io-thread `a/thread)
              :compute `compute')
@@ -256,8 +288,8 @@ they should short-circuit as soon as they can.")
             (finally
               (with-lock interrupt-lock#
                 (vreset! interrupter-thread# nil))
-              (locking interrupter-callbacks
-                (.remove interrupter-callbacks ret#)))))
+              (locking cancellation-callbacks
+                (.remove cancellation-callbacks ret#)))))
          ret#))))
 
 (defmacro async
@@ -302,8 +334,8 @@ they should short-circuit as soon as they can.")
     (let [pc (blocking @this
                        (catch ExecutionException e
                          (throw (.getCause e))))
-          callbacks (locking interrupter-callbacks
-                      (.get interrupter-callbacks pc))]
+          callbacks (locking cancellation-callbacks
+                      (.get cancellation-callbacks pc))]
       (when callbacks
         (when (instance? Future this)
           (swap! callbacks conj (fn [] (future-cancel this)))))
@@ -313,8 +345,8 @@ they should short-circuit as soon as they can.")
     (let [pc (blocking @this
                        (catch ExecutionException e
                          (throw (.getCause e))))
-          callbacks (locking interrupter-callbacks
-                      (.get interrupter-callbacks pc))]
+          callbacks (locking cancellation-callbacks
+                      (.get cancellation-callbacks pc))]
       (when callbacks
         (swap! callbacks conj (fn [] (.cancel this true))))
       pc))
@@ -328,10 +360,11 @@ they should short-circuit as soon as they can.")
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chan]
-  (let [chan?- chan?]
+  (let [chan?- chan?
+        cancellation-chan-bound?- cancellation-chan-bound?]
     `(let [chan# (->promise-chan ~chan)]
        (if (~chan?- chan#)
-         (loop [res# (if (bound? #'*cancellation-chan*)
+         (loop [res# (if (~cancellation-chan-bound?-)
                        (a/alt!
                          *cancellation-chan*
                          ([_#] (make-interrupted-exception))
@@ -340,7 +373,7 @@ they should short-circuit as soon as they can.")
                          :priority true)
                        (->promise-chan (a/<! chan#)))]
            (if (~chan?- res#)
-             (recur (if (bound? #'*cancellation-chan*)
+             (recur (if (~cancellation-chan-bound?-)
                       (a/alt!
                         *cancellation-chan*
                         ([_#] (make-interrupted-exception))
@@ -385,7 +418,7 @@ they should short-circuit as soon as they can.")
   (let [chan-or-value (->promise-chan chan-or-value)]
     (letfn [(<!!-or-alt!!
               [chan]
-              (if (bound? #'*cancellation-chan*)
+              (if (cancellation-chan-bound?)
                 (a/alt!!
                   *cancellation-chan*
                   ([_] (make-interrupted-exception))
@@ -617,7 +650,7 @@ they should short-circuit as soon as they can.")
   ([chan ms timed-out-value-or-fn]
    (async (let [chan (->promise-chan chan)
                 deferred (defer ms ::timed-out)
-                joined-chan (async (await* chan))
+                joined-chan (async (shield (await* chan)))
                 res (first (a/alts! [joined-chan deferred]))]
             (cond (= ::timed-out res)
                   (do
@@ -645,7 +678,7 @@ they should short-circuit as soon as they can.")
       (let [chans (mapv ->promise-chan chans)]
         (doseq [chan chans]
           (a/go
-            (let [res (await* chan)]
+            (let [res (shield (await* chan))]
               (settle! ret res)))))
       (settle! ret nil))
     ret))
@@ -672,7 +705,7 @@ they should short-circuit as soon as they can.")
           (vswap! attempt-chans
                   conj
                   (a/go
-                    (let [v (await* chan)]
+                    (let [v (shield (await* chan))]
                       (if (error? v)
                         v
                         (settle! ret v))))))
@@ -731,7 +764,7 @@ they should short-circuit as soon as they can.")
           (vswap! res-chans
                   conj
                   (a/go
-                    (let [v (await* chan)]
+                    (let [v (shield (await* chan))]
                       (if (error? v)
                         (do (settle! ret v)
                             v)
