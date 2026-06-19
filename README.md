@@ -14,6 +14,8 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
 - [Core Concepts](#core-concepts)
   - [Pools](#pools-async-blocking-compute)
   - [Awaiting](#awaiting-await-wait-await-wait)
+  - [Promise coercion](#promise-coercion)
+  - [Producer settlement](#producer-settlement)
   - [Errors](#errors)
   - [Cancellation](#cancellation)
 - [API Overview](#api-overview)
@@ -108,7 +110,8 @@ Core.async and the CSP style is powerful, but its `go` blocks and channels can f
 - **Separate pools**: dedicated threads for async control flow (`async`), blocking I/O (`blocking`) and CPU‑bound work (`compute`).
 - **Built on core.async**: core.async under the hood, can be used alongside it, promises are core.async's `promise-chan`.
 - **First-class error handling**: unlike core.async, errors are bubbled up and properly handled.
-- **First‑class cancellation**: propagate cancellation through promise‑chans.
+- **First‑class cancellation**: cancellation follows ownership and propagates through promise‑chans.
+- **Interop coercion**: `Future`, `CompletableFuture`, and `IBlockingDeref` can be observed through `->promise-chan`.
 - **Rich composition**: `then`, `chain`, `race`, `all`, `any`, `all-settled`.
 - **Convenient macros**: `ado`, `alet`, `clet` for sequential, ordered, or concurrent binding.
 - **Railway programming**: supports railway programming with `async`/`await*`, if preferred.
@@ -149,7 +152,7 @@ Meaning it offers `async`/`blocking`/`compute`, each are meant to specialize the
 
 ### Awaiting: `await`, `wait`, `await*`, `wait*`
 
-- **`await`** (inside `async`): parks current go‑thread until a promise‑chan completes; re‑throws errors.
+- **`await`** (inside `async`): parks current async execution until a promise‑chan or supported async value completes; re‑throws errors.
 - **`wait`** (outside `async`): blocks calling thread for a result or throws error.
 - **`await*` / `wait*`**: return exceptions as values (no throw).
 
@@ -161,6 +164,32 @@ higher-order functions in JS, so it doesn't feel as restrictive. Once core.async
 `wait` is the counter-part to `await`, it is like `await` but synchronous. It doesn't color your functions, but will block your thread.
 
 `await*` / `wait*` are variants that return the exception as a value, instead of throwing.
+
+`await` and `wait` accept core.async channels, async-style promise-chans, plain values, and values supported by `IntoPromiseChan`.
+They take one async value and return the value settled by its producer. They do not recursively flatten arbitrary raw channels
+that yield more channels.
+
+### Promise coercion
+
+`->promise-chan` converts supported asynchronous values into promise-chans:
+
+- core.async channels and async-style promise-chans pass through unchanged.
+- `Future`, `CompletableFuture`, and other `IBlockingDeref` values are observed from a detached `blocking` task.
+- Cancelling the returned promise-chan attempts to cancel the underlying `Future` / `CompletableFuture` when that is supported.
+- Plain values pass through unchanged.
+
+Most async-style APIs call `->promise-chan` for their inputs, so helpers such as `await`, `wait`, `timeout`, `race`, `any`, `all`, and `all-settled` can observe futures as well as promise-chans.
+
+### Producer settlement
+
+When `async`, `blocking`, or `compute` returns a supported async value, async-style waits one level before settling the producer's result channel.
+This keeps the producer's lifetime aligned with its returned value:
+
+```clojure
+(wait (async (async (async 1)))) ; => 1
+```
+
+Nested async-style producers still compose because each producer waits one level before it settles. Raw channels that themselves yield more channels are not recursively flattened by settlement.
 
 ### Errors
 
@@ -272,6 +301,78 @@ Errors are always modeled this way in async-style, unlike in JS which wraps erro
 
 Cancellation in **async-style** is **cooperative**—you signal it with `cancel!`, but your code must check for it to actually stop.
 
+Cancellation follows ownership, not observation:
+
+- Each execution's result promise-chan is also its cancellation token while that execution body runs.
+- Starting work with `async`, `blocking`, or `compute` inside a running execution creates a direct owned child, unless the start happens inside `detach`.
+- Cancelling a parent cancels its direct children; each child then cancels its own direct children, so cancellation propagates transitively through the tree.
+- When a parent completes normally or fails, unfinished owned direct children are cancelled.
+- Awaiting, racing, timing out, or aggregating already-started work only observes it. Combinators such as `race`, `any`, `all`, `all-settled`, and `timeout` do not take ownership of borrowed input promises/channels.
+- `race` and `any` do not cancel losers because they lost. Locally started losers are only cancelled if their owning parent scope ends while they are still unfinished.
+- Use `detach` when intentionally starting background work that should outlive the current parent scope.
+
+#### Structured concurrency semantics
+
+Each `async`, `blocking`, and `compute` execution creates a cancellation scope. While the body runs, that execution's own result promise-chan is bound as the current cancellation token. Work started inside that scope becomes a direct owned child unless it is started inside `detach`.
+
+Owned children are cancelled when:
+
+- the parent is cancelled,
+- the parent fails,
+- the parent completes while the child is still unfinished.
+
+Only direct children are registered on a parent. Transitive cancellation happens recursively: the parent cancels its direct children, each child cancels its direct children, and so on.
+
+Observation does not create ownership. Passing an already-started promise, channel, `Future`, or `CompletableFuture` to `await`, `wait`, `timeout`, `race`, `any`, `all`, or `all-settled` observes it without making it a child of the current scope. Internal watcher logic, when used, belongs to the current operation but does not transfer ownership of the watched input.
+
+Producer settlement and scope lifetime are tied together. If a producer returns a supported async value, the producer waits one level for that value before settling its own result channel. Cleanup of unfinished owned children happens only after the producer's result channel is actually settled. Nested async-style producers compose because each producer performs this one-level wait; raw channels that yield more channels are not recursively flattened.
+
+Borrowed work keeps its original owner:
+
+```clojure
+(let [p1 (async slow)
+      p2 (async fast)]
+  (async
+    (race [p1 p2]))) ; observes p1/p2; does not own or cancel them
+```
+
+Locally started work is owned by the surrounding scope:
+
+```clojure
+(async
+  (race [(async slow)
+         (async fast)]))
+;; race observes both; when the parent scope settles, any unfinished owned child is cancelled.
+```
+
+The same distinction applies when a combinator is returned from an `async` body:
+
+```clojure
+;; Borrowed inputs: the inner async only observes p1/p2.
+(let [p1 (async slow)
+      p2 (async fast)]
+  (async
+    (race [p1 p2])))
+;; If the inner async is cancelled, only its waiting/race logic is cancelled.
+;; p1 and p2 keep running under their original owner.
+
+;; Locally started inputs: slow and fast are owned by the outer async.
+(async
+  (race [(async slow)
+         (async fast)]))
+;; race itself does not cancel the loser. But after race settles the parent
+;; async settles too, and parent cleanup cancels any unfinished owned child.
+
+;; Explicit background work: detach removes the ownership edge.
+(async
+  (detach
+    (async slow-background-work))
+  :parent-done)
+;; The detached child may continue after the parent completes or is cancelled.
+```
+
+Returning a combinator does not make the combinator own borrowed inputs. It only keeps the parent producer alive until the returned combinator's promise-chan settles. After that, normal parent cleanup applies to unfinished children that were actually started inside the parent scope.
+
 - **`cancel!`**
   ```clojure
   (cancel! ch)              ; cancel with CancellationException
@@ -293,6 +394,14 @@ Cancellation in **async-style** is **cooperative**—you signal it with `cancel!
 
 - **Handling cancellation downstream**
   - `await` / `wait` will re‑throw a `CancellationException` (or return your custom val).
+
+- **`detach`**
+  ```clojure
+  (async
+    (detach
+      (async background-work)))
+  ```
+  Runs the body outside the current cancellation context. Work started inside `detach` is not owned by the current parent and can outlive parent cancellation, failure, or normal completion. `detach` can also be used around `await` / `wait` when you intentionally do not want to read the current parent's cancellation token.
 
 ```clojure
 (def work
@@ -324,6 +433,8 @@ Cancellation in **async-style** is **cooperative**—you signal it with `cancel!
 | `async`          | Run code on the async‑pool                       |
 | `blocking`       | Run code on blocking‑pool                        |
 | `compute`        | Run code on compute‑pool                         |
+| `detach`         | Start work outside the current ownership scope   |
+| `->promise-chan` | Coerce supported async values to promise‑chans   |
 | `sleep`          | `async` sleep for _ms_                           |
 | `defer`          | delay execution by _ms_ then fulfill value or fn |
 
@@ -346,16 +457,22 @@ Cancellation in **async-style** is **cooperative**—you signal it with `cancel!
 |-------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `sleep`     | Asynchronously pause for _ms_ milliseconds; returns a promise‑chan that fulfills with `nil` after the delay.                                         |
 | `defer`     | Wait _ms_ milliseconds, then asynchronously deliver a given value or call a provided fn; returns a promise‑chan.                                     |
-| `timeout`   | Wrap a channel with a _ms_ deadline—if it doesn’t fulfill in time, cancels the original and delivers a `TimeoutException` (or your custom fallback). |
+| `timeout`   | Observe a channel with a _ms_ deadline; returns its result or a `TimeoutException`/custom fallback without cancelling the input.                     |
 
 ### Racing & Gathering
 
 | Function      | Description                                                               |
 |---------------|---------------------------------------------------------------------------|
-| `race`        | First chan (or error) to complete “wins”; cancels all others              |
-| `any`         | First **successful** chan; ignores errors; errors aggregated if all fail  |
-| `all`         | Wait for all; short‑circuits on first error; returns vector of results    |
-| `all-settled` | Wait for all, return vector of all results or errors                      |
+| `race`        | First input value or error to settle wins; observes inputs without cancelling losers |
+| `any`         | First successful input wins; ignores errors until all fail, then returns an aggregate error |
+| `all`         | Wait for all inputs; short‑circuits on first error without cancelling borrowed inputs |
+| `all-settled` | Wait for all inputs and return a vector of values and errors without short‑circuiting |
+
+Notes:
+
+- Passing a plain value treats it as already available. The current implementation may return the first available plain value, but callers should not rely on any ordering among already available values.
+- `all` and `any` short-circuit their returned promise-chan, but that is observation only. They do not cancel borrowed unfinished inputs.
+- If every input to `any` errors, it settles with an `ex-info` whose data includes `{:type :all-errored, :errors [...]}`.
 
 ### Helpers: `ado`, `alet`, `clet`, `time`
 

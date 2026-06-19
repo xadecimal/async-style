@@ -43,7 +43,7 @@
     compute: asynchronously running on the compute-pool, use it for running heavy computation, don't block it
     settle(d): when a channel is delivered a value and closed, or in the case of a promise-chan, it means the promise-chan was fulfilled and will forever return the same value every time it is taken for and additional puts are ignored.
     fulfill(ed): when a channel is delivered a value, but not necessarily closed
-    join(ed): when a channel returns a channel, joining is the process of further taking from the returned channel until a value is returned, thus unrolling a channel of channel of channel of ...
+    join(ed): async-style producers join one returned promise/channel before settling, so result channels settle to values rather than nested promise-chans
     async-pool: the core.async go block executor, it is fixed size, defaulting to 8 threads, don't soft or hard block it
     blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
     compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
@@ -55,6 +55,7 @@
            #'impl/cancelled?
            #'impl/check-cancelled!
            #'impl/cancel!
+           #'impl/detach
            #'proto/->promise-chan
            #'impl/await*
            #'impl/wait*

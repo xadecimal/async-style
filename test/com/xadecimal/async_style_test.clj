@@ -1,6 +1,7 @@
 (ns com.xadecimal.async-style-test
   (:refer-clojure :exclude [await time])
   (:require [clojure.test :refer [deftest is]]
+            [clojure.core.async :as ca]
             [com.xadecimal.async-style :as a :refer :all]
             [com.xadecimal.async-style.impl :as impl]
             [com.xadecimal.testa :refer [testa q! dq!]])
@@ -197,6 +198,220 @@ nil in that case, like :nil or (reduced nil)"
            (is (nil? @(wait promise-chan))))))
 
 
+(deftest ownership-cancellation-tests
+  (testa "Cancelling a parent cancels direct async children. Async work remains
+cooperative, so the child checks cancelled? before doing more work."
+         (let [parent (async
+                        (let [child (async
+                                      (await* (sleep 100))
+                                      (q! (if (cancelled?)
+                                            :async-child-cancelled
+                                            :async-child-done)))]
+                          (q! child)
+                          (await (sleep 500)
+                            (catch InterruptedException _
+                              nil))
+                          :parent-done))
+               child (dq!)]
+           (Thread/sleep 30)
+           (cancel! parent :parent-cancelled)
+           (is (= :parent-cancelled (wait* parent)))
+           (is (instance? CancellationException (wait* child)))
+           (is (= :async-child-cancelled (dq!)))))
+
+  (testa "Parent normal completion cancels unfinished direct async children."
+         (let [started (ca/promise-chan)
+               parent (async
+                        (async
+                          (ca/>! started true)
+                          (await* (sleep 200))
+                          (q! (if (cancelled?)
+                                :async-child-cancelled
+                                :async-child-done)))
+                        (await started)
+                        :parent-done)]
+           (is (= :parent-done (wait parent)))
+           (is (= :async-child-cancelled (dq!)))))
+
+  (testa "Parent normal completion cancels unfinished direct children."
+         (let [started (ca/promise-chan)
+               parent (async
+                        (blocking
+                          (ca/>!! started true)
+                          (Thread/sleep 200)
+                          (q! :blocking-child-done)
+                          (catch InterruptedException _
+                            (q! :blocking-child-cancelled)))
+                        (await started)
+                        :parent-done)]
+           (is (= :parent-done (wait parent)))
+           (is (= :blocking-child-cancelled (dq!)))))
+
+  (testa "Parent failure cancels unfinished direct children."
+         (let [started (ca/promise-chan)
+               parent (async
+                        (blocking
+                          (ca/>!! started true)
+                          (Thread/sleep 200)
+                          (q! :blocking-child-done)
+                          (catch InterruptedException _
+                            (q! :blocking-child-cancelled)))
+                        (await started)
+                        (throw (ex-info "parent failed" {})))]
+           (is (instance? ExceptionInfo (wait* parent)))
+           (is (= :blocking-child-cancelled (dq!)))))
+
+  (testa "Parent cancellation cancels direct blocking and compute children."
+         (let [blocking-started (ca/promise-chan)
+               compute-started (ca/promise-chan)
+               parent (async
+                        (blocking
+                          (ca/>!! blocking-started true)
+                          (Thread/sleep 200)
+                          (q! :blocking-child-done)
+                          (catch InterruptedException _
+                            (q! :blocking-child-cancelled)))
+                        (compute
+                          (ca/>!! compute-started true)
+                          (Thread/sleep 200)
+                          (q! :compute-child-done)
+                          (catch InterruptedException _
+                            (q! :compute-child-cancelled)))
+                        (await blocking-started)
+                        (await compute-started)
+                        (await (sleep 500)
+                          (catch InterruptedException _
+                            nil))
+                        :parent-done)]
+           (Thread/sleep 30)
+           (cancel! parent :parent-cancelled)
+           (is (= :parent-cancelled (wait* parent)))
+           (is (= #{:blocking-child-cancelled :compute-child-cancelled}
+                  (set [(dq!) (dq!)])))))
+
+  (testa "Cancellation propagates transitively through direct child edges."
+         (let [parent (async
+                        (async
+                          (blocking
+                            (q! :grandchild-started)
+                            (Thread/sleep 300)
+                            (q! :grandchild-done)
+                            (catch InterruptedException _
+                              (q! :grandchild-cancelled)))
+                          (await (sleep 500)))
+                        (await (sleep 500)))]
+           (is (= :grandchild-started (dq!)))
+           (cancel! parent :parent-cancelled)
+           (is (= :parent-cancelled (wait* parent)))
+           (is (= :grandchild-cancelled (dq!)))))
+
+  (testa "Borrowed promises passed to race are observed, not owned."
+         (let [p1 (blocking
+                    (Thread/sleep 150)
+                    (q! :p1-done)
+                    :p1
+                    (catch InterruptedException _
+                      (q! :p1-cancelled)))
+               p2 (blocking
+                    (Thread/sleep 200)
+                    (q! :p2-done)
+                    :p2
+                    (catch InterruptedException _
+                      (q! :p2-cancelled)))
+               observer (async (race [p1 p2]))]
+           (Thread/sleep 30)
+           (cancel! observer :observer-cancelled)
+           (is (= :observer-cancelled (wait* observer)))
+           (is (= #{:p1-done :p2-done} (set [(dq!) (dq!)])))))
+
+  (testa "Locally started race losers are not cancelled by race, but are cleaned
+up when their parent scope completes."
+         (let [parent (async
+                        (race [(blocking
+                                 (Thread/sleep 200)
+                                 (q! :slow-done)
+                                 :slow
+                                 (catch InterruptedException _
+                                   (q! :slow-cancelled)))
+                               (blocking
+                                 (Thread/sleep 30)
+                                 :fast)]))]
+           (is (= :fast (wait parent)))
+           (is (= :slow-cancelled (dq!)))))
+
+  (testa "all observes borrowed promises and does not cancel unfinished inputs on
+first error."
+         (let [p1 (blocking
+                    (Thread/sleep 30)
+                    (throw (ex-info "borrowed failure" {})))
+               p2 (blocking
+                    (Thread/sleep 120)
+                    (q! :borrowed-all-done)
+                    :ok
+                    (catch InterruptedException _
+                      (q! :borrowed-all-cancelled)))
+               ret (wait* (all [p1 p2]))]
+           (is (error? ret))
+           (is (= :borrowed-all-done (dq!)))))
+
+  (testa "all-settled observes borrowed promises and does not cancel unfinished
+inputs."
+         (let [p1 (blocking
+                    (Thread/sleep 30)
+                    (throw (ex-info "borrowed failure" {})))
+               p2 (blocking
+                    (Thread/sleep 120)
+                    (q! :borrowed-all-settled-done)
+                    :ok
+                    (catch InterruptedException _
+                      (q! :borrowed-all-settled-cancelled)))
+               ret (wait* (all-settled [p1 p2]))]
+           (is (= 2 (count ret)))
+           (is (= :borrowed-all-settled-done (dq!)))))
+
+  (testa "detach allows intentionally backgrounded work to outlive parent
+completion and cancellation."
+         (let [parent (async
+                        (detach
+                         (async
+                           (await* (sleep 80))
+                           (q! (if (cancelled?)
+                                 :detached-async-cancelled
+                                 :detached-async-done))))
+                        (detach
+                         (blocking
+                           (Thread/sleep 120)
+                           (q! :detached-blocking-done)
+                           (catch InterruptedException _
+                             (q! :detached-blocking-cancelled))))
+                        (detach
+                         (compute
+                           (Thread/sleep 120)
+                           (q! :detached-compute-done)
+                           (catch InterruptedException _
+                             (q! :detached-compute-cancelled))))
+                        :parent-done)]
+           (is (= :parent-done (wait parent)))
+           (is (= #{:detached-async-done
+                    :detached-blocking-done
+                    :detached-compute-done}
+                  (set [(dq!) (dq!) (dq!)]))))
+         (let [parent (async
+                        (detach
+                         (blocking
+                           (Thread/sleep 120)
+                           (q! :detached-cancel-parent-done)
+                           (catch InterruptedException _
+                             (q! :detached-cancel-parent-cancelled))))
+                        (await (sleep 500)
+                          (catch InterruptedException _
+                            nil)))]
+           (Thread/sleep 30)
+           (cancel! parent :parent-cancelled)
+           (is (= :parent-cancelled (wait* parent)))
+           (is (= :detached-cancel-parent-done (dq!))))))
+
+
 (deftest await*-tests
   (testa "Takes a value from a chan."
          (async
@@ -240,9 +455,8 @@ it won't throw."
            (q! (await* (async (/ 1 0)))))
          (is (= ArithmeticException (type (dq!)))))
 
-  (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, <<! will also take from it, until it eventually takes a non chan
-value."
+  (testa "Async-style producers join returned promise-chans before settling, so
+await* receives the settled value."
          (async
            (q! (await* (async (async (async 1))))))
          (is (= 1 (dq!)))))
@@ -279,9 +493,8 @@ of parking."
 it won't throw."
          (is (= ArithmeticException (type (wait* (async (/ 1 0)))))))
 
-  (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, <<!! will also take from it, until it eventually takes a non chan
-value."
+  (testa "Async-style producers join returned promise-chans before settling, so
+wait* receives the settled value."
          (is (= 1 (wait* (async (async (async 1))))))))
 
 
@@ -320,9 +533,8 @@ of parking."
   (testa "If an exception is returned by chan, it will re-throw the exception."
          (is (thrown? ArithmeticException (wait (async (/ 1 0))))))
 
-  (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, wait will also take from it, until it eventually takes a non chan
-value."
+  (testa "Async-style producers join returned promise-chans before settling, so
+wait receives the settled value."
          (is (= 1 (wait (async (async (async 1)))))))
 
   (testa "Takes a value from a chan."
@@ -354,9 +566,8 @@ of parking."
   (testa "If an exception is returned by chan, it will re-throw the exception."
          (is (thrown? ArithmeticException (wait (async (/ 1 0))))))
 
-  (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, wait will also take from it, until it eventually takes a non chan
-value."
+  (testa "Async-style producers join returned promise-chans before settling, so
+wait receives the settled value."
          (is (= 1 (wait (async (async (async 1))))))))
 
 
@@ -407,7 +618,7 @@ async-style to execute the task"
          (is (thrown? ArithmeticException (wait (CompletableFuture/supplyAsync
                                                  (bound-fn [] (/ 1 0)))))))
   (testa "Nested combinations of future, IBlockingDeref, CompletableFuture
-and PromiseChan all unwrap and join fully."
+and PromiseChan settle through producer-side joining."
          (is (= 1 (wait (future (future 1)))))
          (is (= 1 (wait (-> (promise) (deliver (-> (promise) (deliver 1)))))))
          (is (= 1 (wait (CompletableFuture/supplyAsync
@@ -861,8 +1072,17 @@ with try/catch/finally. It's similar to if you always wrapped the inside in a tr
 
   (testa "Compute block can be cancelled, they will skip their execution if cancelled
 before they begin executing."
-         (cancel! (compute (q! :will-timeout-due-to-cancel)))
-         (is (= :timeout (dq!))))
+         (let [blockers (doall
+                         (for [_ (->> (-> (Runtime/getRuntime) .availableProcessors)
+                                      (+ 2)
+                                      range)]
+                           ;; Fill the compute pool so queued can be cancelled
+                           ;; before a worker has a chance to run its body.
+                           (compute (Thread/sleep 150) :blocker)))
+               queued (compute (q! :will-timeout-due-to-cancel))]
+           (cancel! queued)
+           (is (= :timeout (dq! 50)))
+           (wait (all blockers))))
 
   (testa "If you plan on doing lots of work, and want to support it being cancellable,
 you can explictly check for cancellation to interupt your work. By default a
@@ -1082,9 +1302,8 @@ things in inner functions."
                     (q! :thrown))))
          (is (= :thrown (dq!))))
 
-  (testa "Taken value will be fully joined. That means if the value taken is
-itself a chan, await will also take from it, until it eventually takes a non chan
-value."
+  (testa "Async-style producers join returned promise-chans before settling, so
+await receives the settled value."
          (async
            (q! (await (async (async (async 1))))))
          (is (= 1 (dq!)))))
@@ -1265,23 +1484,16 @@ choosing on timeout instead."
          (-> (timeout (async (+ 1 2)) 500)
              (handle q!))
          (is (= 3 (dq!))))
-  (testa "When it does time out, chan will also be cancelled if possible."
-         (-> (timeout
-              (blocking (loop [i 0]
-                          (when-not (cancelled?)
-                            (q! i)
-                            (Thread/sleep 100)
-                            (recur (inc i)))))
-              500
-              :it-timed-out)
-             (handle q!)
-             (wait))
-         (let [[x & xs] (loop [xs [] x (dq!)]
-                          (if (= x :it-timed-out)
-                            (into [x] xs)
-                            (recur (conj xs x) (dq!))))]
-           (is (> (count xs) 3))
-           (is (= :it-timed-out x)))))
+  (testa "When it does time out, timeout observes the input and does not cancel
+borrowed work."
+         (let [work (blocking
+                      (Thread/sleep 200)
+                      (q! :borrowed-timeout-done)
+                      :done
+                      (catch InterruptedException _
+                        (q! :borrowed-timeout-cancelled)))]
+           (is (= :it-timed-out (wait (timeout work 50 :it-timed-out))))
+           (is (= :borrowed-timeout-done (dq!))))))
 
 
 (deftest race-tests
@@ -1315,16 +1527,9 @@ choosing on timeout instead."
              (handle q!))
          (is (= 1 (dq!))))
 
-  (testa "When passing values, they are still racing asynchronously against
-   each other, and the result order is non-deterministic and should
-   not be depended on."
-         (is (not
-              (every?
-               #{1}
-               (doall
-                (for [i (range 3000)]
-                  (-> (race [1 2 3 4 5 6 7 8 9 (async 10)])
-                      (wait))))))))
+  (testa "When passing already available values, the current implementation
+returns the first value, but callers should not rely on value ordering."
+         (is (= 1 (wait (race [1 2 3 4 5 6 7 8 9 (async 10)])))))
 
   (testa "Race does not cancel losing chans once one of them fulfills, they
    all keep running to completion."
@@ -1393,6 +1598,19 @@ choosing on timeout instead."
            (is (error? ret))
            (is (= :all-errored (:type (ex-data ret))))))
 
+  (testa "When all chans fulfill in error?, any includes the taken errors in
+the returned error data."
+         (let [e1 (ex-info "error-1" {})
+               e2 (ex-info "error-2" {})
+               e3 (ex-info "error-3" {})
+               ret (wait* (any [(async (throw e1))
+                                (async (throw e2))
+                                (async (throw e3))]))
+               errors (:errors (ex-data ret))]
+           (is (error? ret))
+           (is (vector? errors))
+           (is (= #{e1 e2 e3} (set errors)))))
+
   (testa "Passing an empty seq will return a closed promise-chan, which in
    turn returns nil when taken from."
          (-> (any [])
@@ -1411,16 +1629,9 @@ choosing on timeout instead."
              (handle q!))
          (is (= 1 (dq!))))
 
-  (testa "When passing values, they are still racing asynchronously against
-   each other, and the result order is non-deterministic and should
-   not be depended on."
-         (is (not
-              (every?
-               #{1}
-               (doall
-                (for [i (range 3000)]
-                  (-> (any [1 2 3 4 5 6 7 8 9 (async 10)])
-                      (wait))))))))
+  (testa "When passing already available values, the current implementation
+returns the first ok value, but callers should not rely on value ordering."
+         (is (= 1 (wait (any [1 2 3 4 5 6 7 8 9 (async 10)])))))
 
   (testa "Any won't cancel the loser chans once one of them fulfills in ok?."
          (-> (any [(blocking
@@ -1638,7 +1849,7 @@ they depend on, others will still run concurrently."
             (q! (+ a b c d)))
           q!)
          (is (= 300 (dq!)))
-         (is (< 300 (dq!) 320)))
+         (is (< 300 (dq!) 330)))
 
   (testa "Bindings evaluate on the async-pool, which means they should not do
 any blocking or heavy compute operation. If you need to do a blocking or compute

@@ -16,7 +16,7 @@
     compute: asynchronously running on the compute-pool, use it for running heavy computation, don't block it
     settle(d): when a channel is delivered a value and closed, or in the case of a promise-chan, it means the promise-chan was fulfilled and will forever return the same value every time it is taken for and additional puts are ignored.
     fulfill(ed): when a channel is delivered a value, but not necessarily closed
-    join(ed): when a channel returns a channel, joining is the process of further taking from the returned channel until a value is returned, thus unrolling a channel of channel of channel of ...
+    join(ed): async-style producers join one returned promise/channel before settling, so result channels settle to values rather than nested promise-chans
     async-pool: the core.async go block executor, it is fixed size, defaulting to 8 threads, don't soft or hard block it
     blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
     compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
@@ -86,6 +86,21 @@
   ([chan] (com.xadecimal.async-style.impl/cancel! chan))
   ([chan v] (com.xadecimal.async-style.impl/cancel! chan v)))
 
+(defmacro detach
+  "Runs body outside the current cancellation context.
+
+   Use when spawning work that should not be cancelled when the parent is
+   cancelled or completed (fire-and-forget, background work, etc.):
+
+     (async
+       (let [background (detach (async ...))]  ; won't be cancelled with parent
+         ...))
+
+   Can also be used around await*/wait* to prevent reading the parent's
+   cancellation channel."
+  {}
+  ([& body] ` (com.xadecimal.async-style.impl/detach ~@body)))
+
 (defn ->promise-chan
   "Coerce to a promise-chan if possible, otherwise is just a pass-through.
 
@@ -99,7 +114,7 @@
 
 (defmacro await*
   "Parking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined.
+   async-style promise values settled by their producers.
 
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -108,7 +123,7 @@
 
 (defn wait*
   "Blocking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined.
+   async-style promise values settled by their producers.
 
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -152,7 +167,7 @@
 
 (defmacro await
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined.
+   returning the value settled by the producer.
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -173,7 +188,7 @@
 
 (defmacro wait
   "Blocking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined.
+   returning the value settled by the producer.
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -192,7 +207,7 @@
    (com.xadecimal.async-style.impl/wait ~chan-or-value ~@body)))
 
 (defn catch
-  "Parking takes fully joined value from chan. If value is an error of
+  "Parking takes the settled value from chan. If value is an error of
    pred-or-type, will call error-handler with it.
 
    Returns a promise-chan settled with the value or the return of the
@@ -218,7 +233,7 @@
    (com.xadecimal.async-style.impl/catch chan pred-or-type error-handler)))
 
 (defn finally
-  "Parking takes fully joined value from chan, and calls f with it no matter if
+  "Parking takes the settled value from chan, and calls f with it no matter if
    the value is ok? or error?.
 
    Returns a promise-chan settled with the taken value, and not the return of f,
@@ -312,8 +327,6 @@
    with the result, else returns a promise-chan settled with a TimeoutException
    or the result of timed-out-value-or-fn.
 
-   In the case of a timeout, chan will be cancelled.
-
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
    compute respectively.
@@ -333,22 +346,20 @@
 
 (defn race
   "Returns a promise-chan that settles as soon as one of the chan in chans
-   fulfill, with the value taken (and joined) from that chan.
+   fulfill, with the value settled by that chan.
 
    Unlike any, this will also return the first error? to be returned by one of
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
 
-   Once a chan fulfills, race cancels all the others.
-
-   Note:
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/race ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/race chans)))
 
 (defn any
   "Returns a promise-chan that settles as soon as one of the chan in chans
-   fulfills in ok?, with the value taken (and joined) from that chan.
+   fulfills in ok?, with the value settled by that chan.
 
    Unlike race, this will ignore chans that fulfilled with an error?. So if the
    first chan to fulfill does so with an error?, any will keep waiting for
@@ -357,9 +368,7 @@
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
 
-   Once a chan fulfills with an ok?, any cancels all the others.
-
-   Note:
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/any ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/any chans)))
@@ -391,7 +400,7 @@
    input chans returning an error? or non-chans throwing an error?, and will
    contain the error? of the first taken chan to return one.
 
-   Note:
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all chans)))

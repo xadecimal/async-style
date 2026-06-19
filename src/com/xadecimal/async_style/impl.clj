@@ -4,11 +4,11 @@
             [clojure.core.async.impl.dispatch :as d]
             [com.xadecimal.async-style.protocols :refer [IntoPromiseChan ->promise-chan]])
   (:import [clojure.core.async.impl.channels ManyToManyChannel]
-           [clojure.lang Agent IBlockingDeref]
-           [java.util.concurrent CancellationException TimeoutException
-            ThreadPoolExecutor CompletableFuture Future ExecutionException]
-           [java.util.concurrent.locks ReentrantLock]
-           [java.util WeakHashMap]))
+	         [clojure.lang Agent IBlockingDeref]
+	         [java.util.concurrent CancellationException TimeoutException
+	          ThreadPoolExecutor CompletableFuture Future ExecutionException]
+	         [java.util.concurrent.locks ReentrantLock]
+	         [java.util WeakHashMap]))
 
 
 ;; TODO: add support for CSP style, maybe a process-factory that creates processes with ins/outs channels of buffer 1 and connectors between them
@@ -82,7 +82,7 @@
               ~@(when finally
                   [finally]))]))))
 
-(defn- settle!
+(defn settle-immediately!
   "Puts v into chan if it is possible to do so immediately (uses offer!) and
    closes chan. If v is nil it will just close chan. Returns true if offer! of v
    in chan succeeded or v was nil, false otherwise."
@@ -111,7 +111,7 @@
   [v]
   (not (error? v)))
 
-(defn- chan?
+(defn chan?
   "Returns true if v is a core.async channel, false otherwise."
   [v]
   (instance? ManyToManyChannel v))
@@ -126,28 +126,53 @@ see if someone tried to cancel their execution, in which case
 they should short-circuit as soon as they can.")
 
 (defn cancellation-chan-bound?
-  "Returns true if *cancellation-chan* is bound and non-shielded,
+  "Returns true if *cancellation-chan* is bound and non-detached,
    false otherwise."
   []
-  (and (bound? #'*cancellation-chan*) (not= *cancellation-chan* ::shielded)))
+  (and (bound? #'*cancellation-chan*) (not= *cancellation-chan* ::detached)))
 
-(defmacro shield
-  "Shields body from parent cancellation context, preventing parent-child
-   relationship registration.
+(defmacro detach
+  "Runs body outside the current cancellation context.
 
-   Use when spawning tasks that should not be cancelled when the parent is
-   cancelled (fire-and-forget, background work, etc.):
+   Use when spawning work that should not be cancelled when the parent is
+   cancelled or completed (fire-and-forget, background work, etc.):
 
      (async
-       (let [background (shield (async ...))]  ; won't be cancelled with parent
+       (let [background (detach (async ...))]  ; won't be cancelled with parent
          ...))
 
-   Can also be used around await*/wait* to prevent reading parent's cancellation
-   channel while maintaining parent-child relationship (rare, mainly for internal
-   use in combinators)."
+   Can also be used around await*/wait* to prevent reading the parent's
+   cancellation channel."
   [& body]
-  `(binding [*cancellation-chan* ::shielded]
+  `(binding [*cancellation-chan* ::detached]
      ~@body))
+
+(defn add-cancellation-callback!
+  [chan callback]
+  (locking cancellation-callbacks
+    (let [callbacks (or (.get cancellation-callbacks chan) (atom #{}))]
+      (.put cancellation-callbacks chan callbacks)
+      (swap! callbacks conj callback))))
+
+(defn remove-cancellation-callbacks!
+  [chan]
+  (locking cancellation-callbacks
+    (.remove cancellation-callbacks chan)))
+
+(defn remove-cancellation-callback!
+  [chan callback]
+  (locking cancellation-callbacks
+    (when-let [callbacks (.get cancellation-callbacks chan)]
+      (swap! callbacks disj callback)
+      (when (empty? @callbacks)
+        (.remove cancellation-callbacks chan)))))
+
+(defn run-cancellation-callbacks!
+  [chan]
+  (let [callbacks (remove-cancellation-callbacks! chan)]
+    (when callbacks
+      (doseq [callback @callbacks]
+        (callback)))))
 
 (defn cancelled?
   "Returns true if execution context was cancelled and thus should be
@@ -201,15 +226,15 @@ they should short-circuit as soon as they can.")
      (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
    (let [chan (->promise-chan chan)]
      (when (chan? chan)
-       (let [cancelled (settle! chan v)]
+       (let [cancelled (settle-immediately! chan v)]
          (when cancelled
-           ;; Execute cancellation callbacks (thread interrupters, child cancellers, etc.)
-           (let [callbacks (locking cancellation-callbacks
-                             (.remove cancellation-callbacks chan))]
-             (when callbacks
-               (doseq [callback @callbacks]
-                 (callback)))))
+           (run-cancellation-callbacks! chan))
          cancelled)))))
+
+(defn register-child!
+  [parent child]
+  (when (and (chan? parent) (chan? child) (not= parent child))
+    (add-cancellation-callback! parent #(cancel! child))))
 
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
@@ -243,54 +268,103 @@ they should short-circuit as soon as they can.")
        (finally
          (.unlock ~lock)))))
 
+(defn- settle-coerced!
+  "Settle chan with an already ->promise-chan-coerced value.
+
+   Async-style settlement waits one level when a producer returns an async
+   value: if v is a channel, take from it asynchronously and settle chan with
+   the taken value; otherwise settle chan immediately. Nested async-style
+   producers still compose because each producer performs this one-level wait
+   before it settles. Raw channels that yield more channels are not recursively
+   flattened here. Cancellation callbacks run only after chan is actually
+   settled."
+  [chan v]
+  (if (chan? v)
+    (a/take! v
+             #(when (settle-immediately! chan (->promise-chan %))
+                (run-cancellation-callbacks! chan)))
+    (when (settle-immediately! chan v)
+      (run-cancellation-callbacks! chan))))
+
+(defn settle!
+  "Settle chan with v after coercing v through ->promise-chan.
+
+   This is the normal producer-side settlement path. It accepts values supported
+   by IntoPromiseChan, waits one level when the coerced value is a channel, and
+   runs cancellation callbacks after chan is actually settled."
+  [chan v]
+  (settle-coerced! chan (->promise-chan v)))
+
+(defn settle-blocking!
+  "Settle chan from a blocking/compute worker after coercing v through
+   ->promise-chan.
+
+   Like settle!, this waits one level when the coerced value is a channel, but
+   it waits inline on the current worker thread, while still respecting the
+   worker's cancellation channel. Cancellation callbacks run only after chan is
+   actually settled."
+  [chan v]
+  (letfn [(take-or-cancel!
+            [chan']
+            (if (cancellation-chan-bound?)
+              (a/alt!!
+                *cancellation-chan*
+                ([_] (make-interrupted-exception))
+                chan'
+                ([v] (->promise-chan v))
+                :priority true)
+              (->promise-chan (a/<!! chan'))))]
+    (let [v (->promise-chan v)
+          v (if (chan? v)
+              (take-or-cancel! v)
+              v)]
+      (when (settle-immediately! chan v)
+        (run-cancellation-callbacks! chan)))))
+
 (defn- async'
   "Wraps body in a way that it executes in an async or blocking block with
    support for cancellation, implicit-try, and returning a promise-chan settled
    with the result or any exception thrown."
   [body execution-type]
-  (let [settle- settle!]
-    (case execution-type
-      :async `(let [ret# (a/promise-chan)]
-                (a/go
-                  (binding [*cancellation-chan* ret#]
-                    (when-not (cancelled?)
-                      (~settle- ret#
-                       (try ~@(implicit-try body)
-                            (catch Throwable t#
-                              t#))))))
-                ret#)
-      `(let [ret# (a/promise-chan)
-             interrupter-thread# (volatile! nil)
-             interrupt-lock# (ReentrantLock.)
-             interrupter# (fn []
-                            (with-lock interrupt-lock#
-                              (when-some [^Thread t# @interrupter-thread#]
-                                (.interrupt t#))))
-             parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
-         (locking cancellation-callbacks
-           (.put cancellation-callbacks ret# (atom #{interrupter#}))
-           (when parent#
-             (let [callbacks# (or (.get cancellation-callbacks parent#)
-                                  (atom #{}))]
-               (.put cancellation-callbacks parent# callbacks#)
-               (swap! callbacks# conj (fn [] (cancel! ret#))))))
-         (~(case execution-type
-             :blocking (if executor-for `a/io-thread `a/thread)
-             :compute `compute')
-          (try
-            (vreset! interrupter-thread# (Thread/currentThread))
-            (binding [*cancellation-chan* ret#]
-              (when-not (cancelled?)
-                (~settle- ret#
-                 (try ~@(implicit-try body)
-                      (catch Throwable t#
-                        t#)))))
-            (finally
-              (with-lock interrupt-lock#
-                (vreset! interrupter-thread# nil))
-              (locking cancellation-callbacks
-                (.remove cancellation-callbacks ret#)))))
-         ret#))))
+  (case execution-type
+    :async `(let [ret# (a/promise-chan)
+                  parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
+              (register-child! parent# ret#)
+              (a/go
+                (binding [*cancellation-chan* ret#]
+                  (when-not (cancelled?)
+                    (settle! ret#
+                             (try ~@(implicit-try body)
+                                  (catch Throwable t#
+                                    t#))))))
+              ret#)
+    `(let [ret# (a/promise-chan)
+           interrupter-thread# (volatile! nil)
+           interrupt-lock# (ReentrantLock.)
+           interrupter# (fn []
+                          (with-lock interrupt-lock#
+                            (when-some [^Thread t# @interrupter-thread#]
+                              (.interrupt t#))))
+           parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
+       (add-cancellation-callback! ret# interrupter#)
+       (register-child! parent# ret#)
+       (~(case execution-type
+           :blocking (if executor-for `a/io-thread `a/thread)
+           :compute `compute')
+        (binding [*cancellation-chan* ret#]
+          (let [value-or-error#
+                (try
+                  (vreset! interrupter-thread# (Thread/currentThread))
+                  (when-not (cancelled?)
+                    (try ~@(implicit-try body)
+                         (catch Throwable t#
+                           t#)))
+                  (finally
+                    (with-lock interrupt-lock#
+                      (vreset! interrupter-thread# nil))
+                    (remove-cancellation-callback! ret# interrupter#)))]
+            (settle-blocking! ret# value-or-error#))))
+       ret#)))
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
@@ -331,9 +405,10 @@ they should short-circuit as soon as they can.")
   (->promise-chan [this] this)
   IBlockingDeref
   (->promise-chan [this]
-    (let [pc (blocking @this
-                       (catch ExecutionException e
-                         (throw (.getCause e))))
+    (let [pc (detach
+              (blocking @this
+                        (catch ExecutionException e
+                          (throw (.getCause e)))))
           callbacks (locking cancellation-callbacks
                       (.get cancellation-callbacks pc))]
       (when callbacks
@@ -342,9 +417,10 @@ they should short-circuit as soon as they can.")
       pc))
   CompletableFuture
   (->promise-chan [this]
-    (let [pc (blocking @this
-                       (catch ExecutionException e
-                         (throw (.getCause e))))
+    (let [pc (detach
+              (blocking @this
+                        (catch ExecutionException e
+                          (throw (.getCause e)))))
           callbacks (locking cancellation-callbacks
                       (.get cancellation-callbacks pc))]
       (when callbacks
@@ -353,39 +429,26 @@ they should short-circuit as soon as they can.")
   Object
   (->promise-chan [this] this))
 
-(defn- join'
-  "Parking take from chan, but if result taken is still a chan?, further parking
-   take from it, repeating until first non chan? result and return it.
+(defn- take'
+  "Parking take from chan-or-value, returning the taken result or value.
 
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
-  [chan]
-  (let [chan?- chan?
-        cancellation-chan-bound?- cancellation-chan-bound?]
-    `(let [chan# (->promise-chan ~chan)]
-       (if (~chan?- chan#)
-         (loop [res# (if (~cancellation-chan-bound?-)
-                       (a/alt!
-                         *cancellation-chan*
-                         ([_#] (make-interrupted-exception))
-                         chan#
-                         ([v#] (->promise-chan v#))
-                         :priority true)
-                       (->promise-chan (a/<! chan#)))]
-           (if (~chan?- res#)
-             (recur (if (~cancellation-chan-bound?-)
-                      (a/alt!
-                        *cancellation-chan*
-                        ([_#] (make-interrupted-exception))
-                        res#
-                        ([v#] (->promise-chan v#))
-                        :priority true)
-                      (->promise-chan (a/<! res#))))
-             res#))
-         chan#))))
+  [chan-or-value]
+  `(let [chan# (->promise-chan ~chan-or-value)]
+     (if (chan? chan#)
+       (if (cancellation-chan-bound?)
+         (a/alt!
+           *cancellation-chan*
+           ([_#] (make-interrupted-exception))
+           chan#
+           ([v#] (->promise-chan v#))
+           :priority true)
+         (->promise-chan (a/<! chan#)))
+       chan#)))
 
 (defn- <<!'
-  "Wraps chan-or-value so that if chan it joins from it returning the joined
+  "Wraps chan-or-value so that if chan it takes from it returning the taken
    result, else if value it returns value directly, or if chan-or-value throws it
    returns the thrown exception.
 
@@ -396,12 +459,12 @@ they should short-circuit as soon as they can.")
     `(let [~chan-or-value-gensym (try ~chan-or-value
                                       (catch Throwable t#
                                         t#))
-           value-or-error# ~(join' chan-or-value-gensym)]
+           value-or-error# ~(take' chan-or-value-gensym)]
        value-or-error#)))
 
 (defmacro await*
   "Parking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined.
+   async-style promise values settled by their producers.
 
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -410,31 +473,25 @@ they should short-circuit as soon as they can.")
 
 (defn wait*
   "Blocking takes from chan-or-value so that any exception is returned, and with
-   taken result fully joined.
+   async-style promise values settled by their producers.
 
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chan-or-value]
   (let [chan-or-value (->promise-chan chan-or-value)]
-    (letfn [(<!!-or-alt!!
-              [chan]
-              (if (cancellation-chan-bound?)
-                (a/alt!!
-                  *cancellation-chan*
-                  ([_] (make-interrupted-exception))
-                  chan
-                  ([v] (->promise-chan v))
-                  :priority true)
-                (->promise-chan (a/<!! chan))))]
-      (if (chan? chan-or-value)
-        (loop [res (<!!-or-alt!! chan-or-value)]
-          (if (chan? res)
-            (recur (<!!-or-alt!! res))
-            res))
-        chan-or-value))))
+    (if (chan? chan-or-value)
+      (if (cancellation-chan-bound?)
+        (a/alt!!
+          *cancellation-chan*
+          ([_] (make-interrupted-exception))
+          chan-or-value
+          ([v] (->promise-chan v))
+          :priority true)
+        (->promise-chan (a/<!! chan-or-value)))
+      chan-or-value)))
 
 (defn- <<?'
-  "Wraps chan-or-value so that if chan it joins from it returning the joined
+  "Wraps chan-or-value so that if chan it takes from it returning the taken
    result, else if value it returns value directly, or if chan-or-value throws it
    re-throws exception.
 
@@ -447,7 +504,7 @@ they should short-circuit as soon as they can.")
        value-or-error#)))
 
 (defn- <<??'
-  "Wraps chan-or-value so that if chan it joins from it returning the joined
+  "Wraps chan-or-value so that if chan it takes from it returning the taken
    result, else if value it returns value directly, or if chan-or-value throws it
    re-throws exception.
 
@@ -461,7 +518,7 @@ they should short-circuit as soon as they can.")
 
 (defmacro await
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined.
+   returning the value settled by the producer.
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -480,7 +537,7 @@ they should short-circuit as soon as they can.")
 
 (defmacro wait
   "Blocking takes from chan-or-value so that any exception taken is re-thrown,
-   and with taken result fully joined.
+   returning the value settled by the producer.
 
    Supports implicit-try to handle thrown exceptions such as:
 
@@ -497,7 +554,7 @@ they should short-circuit as soon as they can.")
   (first (implicit-try (cons (<<??' chan-or-value) body))))
 
 (defn catch
-  "Parking takes fully joined value from chan. If value is an error of
+  "Parking takes the settled value from chan. If value is an error of
    pred-or-type, will call error-handler with it.
 
    Returns a promise-chan settled with the value or the return of the
@@ -527,7 +584,7 @@ they should short-circuit as soon as they can.")
          v)))))
 
 (defn finally
-  "Parking takes fully joined value from chan, and calls f with it no matter if
+  "Parking takes the settled value from chan, and calls f with it no matter if
    the value is ok? or error?.
 
    Returns a promise-chan settled with the taken value, and not the return of f,
@@ -650,7 +707,7 @@ they should short-circuit as soon as they can.")
   ([chan ms timed-out-value-or-fn]
    (async (let [chan (->promise-chan chan)
                 deferred (defer ms ::timed-out)
-                joined-chan (async (shield (await* chan)))
+                joined-chan (async (await* chan))
                 res (first (a/alts! [joined-chan deferred]))]
             (cond (= ::timed-out res)
                   (do
@@ -662,30 +719,50 @@ they should short-circuit as soon as they can.")
                   (do (cancel! deferred)
                       res))))))
 
+(defn- observe-until-settled!
+  "Runs f with chan-or-value's result unless ret settles first. The second
+   argument to f is true when the value was already coerced through
+   ->promise-chan, false when it was taken from a channel. Plain values are
+   already available, so they are applied synchronously."
+  [ret chan-or-value f]
+  (if (chan? chan-or-value)
+    (a/go
+      (let [[v selected] (a/alts! [ret chan-or-value] :priority true)]
+        (when (= selected chan-or-value)
+          (f v false))))
+    (f chan-or-value true)))
+
+(defn- settle-observed!
+  [ret v coerced?]
+  (if coerced?
+    (settle-coerced! ret v)
+    (settle! ret v)))
+
 (defn race
   "Returns a promise-chan that settles as soon as one of the chan in chans
-   fulfill, with the value taken (and joined) from that chan.
+   fulfill, with the value settled by that chan.
 
    Unlike any, this will also return the first error? to be returned by one of
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
 
-   Note:
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (let [ret (a/promise-chan)]
     (if (seq chans)
       (let [chans (mapv ->promise-chan chans)]
         (doseq [chan chans]
-          (a/go
-            (let [res (shield (await* chan))]
-              (settle! ret res)))))
+          (observe-until-settled!
+           ret
+           chan
+           #(settle-observed! ret %1 %2))))
       (settle! ret nil))
     ret))
 
 (defn any
   "Returns a promise-chan that settles as soon as one of the chan in chans
-   fulfills in ok?, with the value taken (and joined) from that chan.
+   fulfills in ok?, with the value settled by that chan.
 
    Unlike race, this will ignore chans that fulfilled with an error?. So if the
    first chan to fulfill does so with an error?, any will keep waiting for
@@ -694,29 +771,30 @@ they should short-circuit as soon as they can.")
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
 
-   Note:
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (let [ret (a/promise-chan)
-        attempt-chans (volatile! [])]
+        errors (atom [])]
     (if (seq chans)
-      (let [chans (mapv ->promise-chan chans)]
+      (let [chans (mapv ->promise-chan chans)
+            remaining (atom (count chans))]
         (doseq [chan chans]
-          (vswap! attempt-chans
-                  conj
-                  (a/go
-                    (let [v (shield (await* chan))]
-                      (if (error? v)
-                        v
-                        (settle! ret v))))))
-        (a/go
-          (let [errors (a/<! (a/map vector @attempt-chans))]
-            (when (every? error? errors)
-              (settle! ret (ex-info
-                            "All chans returned errors"
-                            {:block :any
-                             :errors errors
-                             :type :all-errored}))))))
+          (observe-until-settled!
+           ret
+           chan
+           (fn [v coerced?]
+             (if (error? v)
+               (do
+                 (swap! errors conj v)
+                 (when (zero? (swap! remaining dec))
+                   (settle-coerced! ret
+                                    (ex-info
+                                     "All chans returned errors"
+                                     {:block :any
+                                      :errors @errors
+                                      :type :all-errored}))))
+               (settle-observed! ret v coerced?))))))
       (settle! ret nil))
     ret))
 
@@ -753,26 +831,26 @@ they should short-circuit as soon as they can.")
    input chans returning an error? or non-chans throwing an error?, and will
    contain the error? of the first taken chan to return one.
 
-   Note:
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
-  (let [ret (a/promise-chan)
-        res-chans (volatile! [])]
+  (let [ret (a/promise-chan)]
     (if (seq chans)
-      (let [chans (mapv ->promise-chan chans)]
-        (doseq [chan chans]
-          (vswap! res-chans
-                  conj
-                  (a/go
-                    (let [v (shield (await* chan))]
-                      (if (error? v)
-                        (do (settle! ret v)
-                            v)
-                        v)))))
-        (a/go
-          (let [results (a/<! (a/map vector @res-chans))]
-            (when-not (some error? results)
-              (settle! ret results)))))
+      (let [chans (mapv ->promise-chan chans)
+            n (count chans)
+            results (atom (vec (repeat n nil)))
+            remaining (atom n)]
+        (doseq [[idx chan] (map-indexed vector chans)]
+          (observe-until-settled!
+           ret
+           chan
+           (fn [v coerced?]
+             (if (error? v)
+               (settle-observed! ret v coerced?)
+               (do
+                 (swap! results assoc idx v)
+                 (when (zero? (swap! remaining dec))
+                   (settle-coerced! ret @results))))))))
       (a/close! ret))
     ret))
 

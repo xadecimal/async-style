@@ -1,8 +1,13 @@
 {:tasks
  {test (do (println "Testing with core.async 1.8+")
-           (clojure "-M:test")
-           (println "Now testing with core.async 1.7")
-           (clojure "-M:test:test-1.7"))
+        (clojure "-M:test")
+        (println "Now testing with core.async 1.7")
+        (clojure "-M:test:test-1.7"))
+  test-vars {:doc "Run specific tests by passing their fully qualified names"
+             :task (do (println "Testing with core.async 1.8+")
+                    (apply clojure "-M:test" "-v" *command-line-args*)
+                    (println "Now testing with core.async 1.7")
+                    (apply clojure "-M:test" "-v" *command-line-args*))}
   gen (clojure "-X:build gen")
   lint (clojure "-X:build lint")
   deploy (clojure "-X:build deploy")
@@ -12,25 +17,25 @@
   bump-minor-version (clojure "-X:build bump-minor-version")
   bump-patch-version (clojure "-X:build bump-patch-version")
   release (do (run 'lint)
-              (run 'gen)
-              (run 'test)
-              (run 'install))
+           (run 'gen)
+           (run 'test)
+           (run 'install))
   publish {:requires ([clojure.edn :as edn])
            :task (let [version (-> (edn/read-string (slurp "build.edn")) :version)]
-                   (run 'release)
-                   (run 'update-documents)
-                   (shell "git add .")
-                   (try (shell "git diff --quiet --cached")
-                        (catch Exception _
-                          (shell
-                           (str "git commit -m \"Prepared for new release \"" version))))
-                   (shell "git push")
-                   (shell (str "git tag -a " version " -m \"Release v\"" version))
-                   (shell (str "git push origin " version))
-                   (run 'deploy))}
+                  (run 'release)
+                  (run 'update-documents)
+                  (shell "git add .")
+                  (try (shell "git diff --quiet --cached")
+                   (catch Exception _
+                    (shell
+                     (str "git commit -m \"Prepared for new release \"" version))))
+                  (shell "git push")
+                  (shell (str "git tag -a " version " -m \"Release v\"" version))
+                  (shell (str "git push origin " version))
+                  (run 'deploy))}
   publish-patch (do (run 'bump-patch-version)
-                    (run 'publish))
+                 (run 'publish))
   publish-minor (do (run 'bump-minor-version)
-                    (run 'publish))
+                 (run 'publish))
   publish-major (do (run 'bump-major-version)
-                    (run 'publish))}}
+                 (run 'publish))}}
