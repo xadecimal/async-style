@@ -1,9 +1,12 @@
 (ns com.xadecimal.async-style.impl
-  (:refer-clojure :exclude [await time])
+  (:refer-clojure :exclude [areduce await time])
   (:require [clojure.core.async :as a]
             [clojure.core.async.impl.dispatch :as d]
+            [clojure.core.async.impl.protocols :as async.impl]
+            [clojure.core.protocols :as p]
             [com.xadecimal.async-style.protocols :refer [IntoPromiseChan ->promise-chan]])
-  (:import [clojure.core.async.impl.channels ManyToManyChannel]
+  (:import [clojure.core.async.impl.buffers PromiseBuffer]
+           [clojure.core.async.impl.channels ManyToManyChannel]
 	         [clojure.lang Agent IBlockingDeref]
 	         [java.util.concurrent CancellationException TimeoutException
 	          ThreadPoolExecutor CompletableFuture Future ExecutionException]
@@ -111,11 +114,6 @@
   [v]
   (not (error? v)))
 
-(defn chan?
-  "Returns true if v is a core.async channel, false otherwise."
-  [v]
-  (instance? ManyToManyChannel v))
-
 (def ^:dynamic *cancellation-chan*)
 (alter-meta! #'*cancellation-chan* assoc :doc
              "Used by the cancellation machinery, will be bound to a channel
@@ -201,41 +199,6 @@ they should short-circuit as soon as they can.")
   (when (cancelled?)
     (throw (make-interrupted-exception))))
 
-(defn cancel!
-  "When called on chan, tries to tell processes currently executing over the
-   chan that they should interrupt and short-circuit (aka cancel) their execution
-   as soon as they can, as it is no longer needed.
-
-   The way cancellation is conveyed is by settling the return channel of async,
-   blocking and compute blocks to a CancellationException, unless passed a v
-   explicitly, in which case it will settle it with v.
-
-   That means by default a block that has its execution cancelled will return a
-   CancellationException and thus awaiters and other takers of its result will
-   see the exception and can handle it accordingly. If instead you want to cancel
-   the block so it returns a value, pass in a v and the awaiters and takers will
-   receive that value instead. You can't set nil as the cancelled value,
-   attempting to do so will throw an IllegalArgumentException.
-
-   It is up to processes inside async, blocking and compute blocks to properly
-   check for cancellation on a channel."
-  ([chan]
-   (cancel! chan (make-cancellation-exception)))
-  ([chan v]
-   (when (nil? v)
-     (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
-   (let [chan (->promise-chan chan)]
-     (when (chan? chan)
-       (let [cancelled (settle-immediately! chan v)]
-         (when cancelled
-           (run-cancellation-callbacks! chan))
-         cancelled)))))
-
-(defn register-child!
-  [parent child]
-  (when (and (chan? parent) (chan? child) (not= parent child))
-    (add-cancellation-callback! parent #(cancel! child))))
-
 (defn- compute-call
   "Executes f in the compute-pool, returning immediately to the calling thread.
    Returns a channel which will receive the result of calling f when completed,
@@ -268,18 +231,170 @@ they should short-circuit as soon as they can.")
        (finally
          (.unlock ~lock)))))
 
+(defn- start-async-generator!
+  "Starts an async-generator producer once unless its source was already
+   returned. Registers producer cancellation callbacks before recording it in
+   state."
+  [ch state start-fn]
+  (locking state
+    (when-not (or (:started? @state)
+                  (:returned? @state))
+      (let [producer (start-fn)]
+        (add-cancellation-callback! producer #(async.impl/close! ch))
+        (when-some [resume-chan (:resume-chan @state)]
+          (add-cancellation-callback! producer #(a/close! resume-chan)))
+        (swap! state assoc
+               :started? true
+               :producer producer)))))
+
+;; Cold core.async-compatible channel returned by async-generator. Its mutable
+;; metadata field m is read and written only while holding the state monitor.
+(deftype AsyncGeneratorChannel
+  [ch state start-fn finalized ^:unsynchronized-mutable m]
+  clojure.lang.IReference
+  (meta [_]
+    (locking state
+      m))
+  (alterMeta [_ f args]
+    (locking state
+      (set! m (apply f m args))
+      m))
+  (resetMeta [_ new-meta]
+    (locking state
+      (set! m new-meta)
+      m))
+
+  p/Datafiable
+  (datafy [_]
+    (p/datafy ch))
+
+  async.impl/Channel
+  (closed? [_]
+    (async.impl/closed? ch))
+  (close! [_]
+    (async.impl/close! ch))
+
+  async.impl/ReadPort
+  (take! [_ handler]
+    (start-async-generator! ch state start-fn)
+    (when (and (:resume-chan @state)
+               (:needs-resume? @state))
+      (swap! state assoc :needs-resume? false)
+      (a/put! (:resume-chan @state) true))
+    (async.impl/take! ch handler))
+
+  async.impl/WritePort
+  (put! [_ val handler]
+    (async.impl/put! ch val handler)))
+
+(defn chan?
+  "Returns true if v is a core.async or async-style channel, false otherwise."
+  [v]
+  (or (instance? ManyToManyChannel v)
+      (instance? AsyncGeneratorChannel v)))
+
+(defn- promise-chan?
+  "Returns true for core.async promise-chans, which async-style treats as
+   single-result async values during producer settlement. Ordinary channels and
+   async-generator channels are multi-value/source channels and are preserved."
+  [v]
+  (and (instance? ManyToManyChannel v)
+       (instance? PromiseBuffer (.-buf ^ManyToManyChannel v))))
+
+(defn ensure-started!
+  "Starts a cold async-generator channel if needed. Idempotent."
+  [^AsyncGeneratorChannel source]
+  (start-async-generator! (.-ch source) (.-state source) (.-start-fn source))
+  source)
+
+(defn- cancel-channel!
+  "Settles chan with cancellation value v and runs its cancellation callbacks
+   when settlement succeeds. Returns whether cancellation won, or nil when the
+   coerced value is not channel-like."
+  [chan v]
+  (let [chan (->promise-chan chan)]
+    (when (chan? chan)
+      (let [cancelled (settle-immediately! chan v)]
+        (when cancelled
+          (run-cancellation-callbacks! chan))
+        cancelled))))
+
+(defn async-return!
+  "Requests early cleanup for an async-generator channel. Returns its
+   finalization channel."
+  [^AsyncGeneratorChannel source]
+  (let [ch (.-ch source)
+        state (.-state source)
+        finalized (.-finalized source)]
+    (locking state
+      (when-not (:returned? @state)
+        (swap! state assoc :returned? true)
+        (async.impl/close! ch)
+        (when-some [resume-chan (:resume-chan @state)]
+          (a/close! resume-chan))
+        (if-some [producer (:producer @state)]
+          (cancel-channel! producer (make-cancellation-exception))
+          (settle-immediately! finalized true))))
+    finalized))
+
+(defn source-cleanup-chan
+  "Requests cleanup for an async-generator source and returns its finalization
+   channel. Returns nil for sources without async-generator lifecycle support."
+  [source]
+  (when (instance? AsyncGeneratorChannel source)
+    (async-return! source)))
+
+(defn cancel!
+  "When called on chan, tries to tell processes currently executing over the
+   chan that they should interrupt and short-circuit (aka cancel) their execution
+   as soon as they can, as it is no longer needed.
+
+   The way cancellation is conveyed is by settling the return channel of async,
+   blocking and compute blocks to a CancellationException, unless passed a v
+   explicitly, in which case it will settle it with v.
+
+   When called on a lifecycle-aware async-style source, such as an
+   async-generator, it requests lifecycle cleanup using the same path as areturn.
+   This is fire-and-forget; use areturn when you need to wait for cleanup and
+   finally blocks to finish.
+
+   That means by default a block that has its execution cancelled will return a
+   CancellationException and thus awaiters and other takers of its result will
+   see the exception and can handle it accordingly. If instead you want to cancel
+   the block so it returns a value, pass in a v and the awaiters and takers will
+   receive that value instead. You can't set nil as the cancelled value,
+   attempting to do so will throw an IllegalArgumentException.
+
+   It is up to processes inside async, blocking and compute blocks to properly
+   check for cancellation on a channel."
+  ([chan]
+   (cancel! chan (make-cancellation-exception)))
+  ([chan v]
+   (when (nil? v)
+     (throw (IllegalArgumentException. "Can't put nil as the cancelled value.")))
+   (let [chan (->promise-chan chan)]
+     (if (instance? AsyncGeneratorChannel chan)
+       (do
+         (async-return! chan)
+         true)
+       (cancel-channel! chan v)))))
+
+(defn register-child!
+  [parent child]
+  (when (and (chan? parent) (chan? child) (not= parent child))
+    (add-cancellation-callback! parent #(cancel! child))))
+
 (defn- settle-coerced!
   "Settle chan with an already ->promise-chan-coerced value.
 
-   Async-style settlement waits one level when a producer returns an async
-   value: if v is a channel, take from it asynchronously and settle chan with
-   the taken value; otherwise settle chan immediately. Nested async-style
-   producers still compose because each producer performs this one-level wait
-   before it settles. Raw channels that yield more channels are not recursively
-   flattened here. Cancellation callbacks run only after chan is actually
+   Async-style settlement assimilates one promise-like single-result async
+   value: if v is a promise-chan, take from it asynchronously and settle chan
+   with the taken value; otherwise settle chan immediately. Multi-value source
+   channels, including async-generator channels and ordinary raw channels, are
+   preserved as values. Cancellation callbacks run only after chan is actually
    settled."
   [chan v]
-  (if (chan? v)
+  (if (promise-chan? v)
     (a/take! v
              #(when (settle-immediately! chan (->promise-chan %))
                 (run-cancellation-callbacks! chan)))
@@ -290,8 +405,9 @@ they should short-circuit as soon as they can.")
   "Settle chan with v after coercing v through ->promise-chan.
 
    This is the normal producer-side settlement path. It accepts values supported
-   by IntoPromiseChan, waits one level when the coerced value is a channel, and
-   runs cancellation callbacks after chan is actually settled."
+   by IntoPromiseChan, assimilates one promise-like single-result async value,
+   preserves multi-value source channels, and runs cancellation callbacks after
+   chan is actually settled."
   [chan v]
   (settle-coerced! chan (->promise-chan v)))
 
@@ -299,10 +415,10 @@ they should short-circuit as soon as they can.")
   "Settle chan from a blocking/compute worker after coercing v through
    ->promise-chan.
 
-   Like settle!, this waits one level when the coerced value is a channel, but
-   it waits inline on the current worker thread, while still respecting the
-   worker's cancellation channel. Cancellation callbacks run only after chan is
-   actually settled."
+   Like settle!, this assimilates one promise-like single-result async value,
+   but waits inline on the current worker thread while still respecting the
+   worker's cancellation channel. Multi-value source channels are preserved.
+   Cancellation callbacks run only after chan is actually settled."
   [chan v]
   (letfn [(take-or-cancel!
             [chan']
@@ -315,7 +431,7 @@ they should short-circuit as soon as they can.")
                 :priority true)
               (->promise-chan (a/<!! chan'))))]
     (let [v (->promise-chan v)
-          v (if (chan? v)
+          v (if (promise-chan? v)
               (take-or-cancel! v)
               v)]
       (when (settle-immediately! chan v)
@@ -398,10 +514,116 @@ they should short-circuit as soon as they can.")
   [& body]
   (async' body :compute))
 
+(defn make-async-generator
+  "Creates a cold AsyncGeneratorChannel using opts and producer-fn.
+
+   A zero or omitted :buffer-size creates an unbuffered pull-based source;
+   positive sizes create a fixed lossless buffer."
+  [opts producer-fn]
+  (let [buffer-size (:buffer-size opts 0)
+        unbuffered? (zero? buffer-size)
+        out (if (zero? buffer-size)
+              (a/chan)
+              (a/chan buffer-size))
+        finalized (a/promise-chan)
+        state (atom {:started? false
+                     :returned? false
+                     :resume-chan (when unbuffered?
+                                    (a/chan))
+                     :needs-resume? false})
+        start-fn (fn [] (producer-fn out state finalized))]
+    (AsyncGeneratorChannel. out state start-fn finalized nil)))
+
+(def ^:dynamic *yield-context*
+  "Binds the current async-generator output channel and state for yield."
+  nil)
+
+(defmacro async-generator
+  "Creates a cold async-style channel whose body can yield many values.
+
+   The body runs on the async-pool when the returned channel is first consumed,
+   not when the channel is created. Values published with yield are delivered as
+   raw channel values, and channel close means the generator is done.
+
+   Accepts an optional options map. Currently supported:
+     * :buffer-size - fixed, lossless output buffer size. Defaults to 0 for an
+       unbuffered, pull-based handoff.
+
+   Supports implicit trailing catch/finally forms like async, blocking, and
+   compute."
+  [& body]
+  (let [[opts body] (if (map? (first body))
+                      [(first body) (next body)]
+                      [{} body])]
+    `(make-async-generator
+      ~opts
+      (fn [out# state# finalized#]
+        (async
+          (try
+            (await
+             (binding [*yield-context* {:chan out# :state state#}]
+               ~@(implicit-try body)))
+            (catch Throwable t#
+              (when-not (or (:returned? @state#)
+                            (instance? InterruptedException t#)
+                            (instance? CancellationException t#))
+                (a/>! out# t#)))
+            (finally
+              (a/close! out#)
+              (settle-immediately! finalized# true))))))))
+
+(defmacro yield
+  "Publishes one value from inside async-generator.
+
+   The value is consumed through await before it is put on the output channel, so
+   yielding a promise-chan, Future, or CompletableFuture exposes its settled
+   value to downstream consumers. yield parks when the configured generator
+   buffer is full and returns nil on success.
+
+   async-generator cannot yield nil, because nil is core.async's closed-channel
+   value and means the source is done."
+  [v]
+  `(do
+     (when (nil? *yield-context*)
+       (throw (IllegalStateException. "yield can only be used inside async-generator.")))
+     (let [yield-chan# (:chan *yield-context*)
+           yield-state# (:state *yield-context*)
+           v# (await ~v)]
+       (when (nil? v#)
+         (throw (IllegalArgumentException. "async-generator cannot yield nil; nil means done.")))
+       (if (cancellation-chan-bound?)
+         (a/alt!
+           *cancellation-chan*
+           ([_#] (throw (make-interrupted-exception)))
+           [[yield-chan# v#]]
+           ([accepted?# _#]
+            (when-not accepted?#
+              (throw (make-interrupted-exception)))
+            nil)
+           :priority true)
+         (when-not (a/>! yield-chan# v#)
+           (throw (make-interrupted-exception))))
+       (when-some [resume-chan# (:resume-chan @yield-state#)]
+         (swap! yield-state# assoc :needs-resume? true)
+         (if (cancellation-chan-bound?)
+           (a/alt!
+             *cancellation-chan*
+             ([_#] (throw (make-interrupted-exception)))
+             resume-chan#
+             ([v#]
+              (when-not v#
+                (throw (make-interrupted-exception)))
+              nil)
+             :priority true)
+           (when-not (a/<! resume-chan#)
+             (throw (make-interrupted-exception))))))))
+
 (extend-protocol IntoPromiseChan
   nil
   (->promise-chan [this] this)
   ManyToManyChannel
+  (->promise-chan [this] this)
+  AsyncGeneratorChannel
   (->promise-chan [this] this)
   IBlockingDeref
   (->promise-chan [this]
@@ -853,6 +1075,257 @@ they should short-circuit as soon as they can.")
                    (settle-coerced! ret @results))))))))
       (a/close! ret))
     ret))
+
+(defn source-items
+  "Returns source as a sequence of items for async iteration.
+
+   Nil stays empty, seqable and Iterable sources are traversed, and other values
+   become a single-item sequence."
+  [source]
+  (cond
+    (nil? source) nil
+    (seqable? source) (seq source)
+    (instance? Iterable source) (iterator-seq (.iterator ^Iterable source))
+    :else (list source)))
+
+(defn anext
+  "Takes one raw value from channel-like source, returning a promise-chan.
+
+   If source is a cold async-style generator, taking starts it in the current
+   scope. The returned promise-chan settles to the next value, or nil when the
+   source is done. Errors are represented using normal async-style semantics:
+   use wait/await to throw them, or wait*/await* to receive them as values.
+
+   anext observes borrowed plain channels without closing or cancelling them.
+   Collection-like sources are not supported."
+  [source]
+  (let [ret (a/promise-chan)
+        parent (when (cancellation-chan-bound?) *cancellation-chan*)]
+    (register-child! parent ret)
+    (if (chan? source)
+      (do
+        (when (instance? AsyncGeneratorChannel source)
+          (ensure-started! source))
+        (a/go
+          (let [[v selected] (a/alts! [ret source] :priority true)]
+            (when (= selected source)
+              (settle! ret v)))))
+      (settle! ret (IllegalArgumentException.
+                    "anext only supports channel-like sources.")))
+    ret))
+
+(defn areturn
+  "Requests early cleanup for a lifecycle-aware async-style source.
+
+   Returns a promise-chan settling to nil after cleanup has completed. For
+   borrowed plain channels, areturn is a no-op: it does not close or cancel the
+   channel."
+  [source]
+  (detach
+    (async
+      (when-some [cleanup (source-cleanup-chan source)]
+        (detach (await cleanup)))
+      nil)))
+
+(defn areduce
+  "Asynchronously reduces source with rf and init, returning a promise-chan
+   settled with the final accumulator.
+
+   source may be channel-like or collection-like. Each element is consumed with
+   await semantics, so Throwable values are thrown and values supported by
+   IntoPromiseChan are awaited. If rf returns reduced, reduction stops early,
+   lifecycle-aware sources are returned/cleaned up, and the promise-chan settles
+   with the unwrapped reduced value.
+
+   rf runs on the async-pool and should be quick: do not block, park, wait, or
+   perform heavy compute work inside it."
+  [rf init source]
+  (async
+    (let [source (->promise-chan source)]
+      (try
+        (if (chan? source)
+          (loop [acc init]
+            (let [v (await* source)]
+              (if (nil? v)
+                acc
+                (let [acc' (rf acc (await v))]
+                  (if (reduced? acc')
+                    (do
+                      (detach (await (areturn source)))
+                      @acc')
+                    (recur acc'))))))
+          (loop [acc init xs (seq (source-items source))]
+            (if-let [xs (seq xs)]
+              (let [acc' (rf acc (await (first xs)))]
+                (if (reduced? acc')
+                  @acc'
+                  (recur acc' (next xs))))
+              acc)))
+        (catch Throwable t
+          (when (chan? source)
+            (detach (await (areturn source))))
+          (throw t))))))
+
+(defn atransduce
+  "Asynchronously transduces source with xf, rf, and init, returning a
+   promise-chan settled with the completed reduction result.
+
+   source may be channel-like or collection-like. Early transducer completion,
+   errors, and cancellation return/clean up lifecycle-aware sources. Transducer
+   and reducing steps run on the async-pool and should be quick; do not block,
+   park, wait, or perform heavy compute work inside them."
+  [xf rf init source]
+  (async
+    (let [source (->promise-chan source)
+          rf (xf rf)]
+      (try
+        (let [acc (if (chan? source)
+                    (loop [acc init]
+                      (let [v (await* source)]
+                        (if (nil? v)
+                          acc
+                          (let [acc' (rf acc (await v))]
+                            (if (reduced? acc')
+                              (do
+                                (detach (await (areturn source)))
+                                @acc')
+                              (recur acc'))))))
+                    (loop [acc init xs (seq (source-items source))]
+                      (if-let [xs (seq xs)]
+                        (let [acc' (rf acc (await (first xs)))]
+                          (if (reduced? acc')
+                            @acc'
+                            (recur acc' (next xs))))
+                        acc)))]
+          (rf acc))
+        (catch Throwable t
+          (when (chan? source)
+            (detach (await (areturn source))))
+          (throw t))))))
+
+(defn ainto
+  "Asynchronously consumes source into to, returning a promise-chan settled with
+   the completed collection.
+
+   With two arguments, behaves like async into. With three arguments, applies xf
+   as a transducer. source may be channel-like or collection-like, and each
+   element is consumed with await semantics."
+  ([to source]
+   (atransduce identity conj to source))
+  ([to xf source]
+   (atransduce xf conj to source)))
+
+(defn async-iteration-stop
+  "Returns the internal exception used to stop async iteration normally."
+  []
+  (ex-info "Async iteration stopped." {:type ::async-iteration-stopped}))
+
+(defn async-iteration-stopped?
+  "Returns true when t is the internal normal-stop exception for async
+   iteration."
+  [t]
+  (and (instance? clojure.lang.ExceptionInfo t)
+       (= ::async-iteration-stopped (:type (ex-data t)))))
+
+(defn- parse-async-for-bindings
+  "Parses async for-style bindings into binding, source, and modifier groups."
+  [bindings]
+  (loop [bindings (seq bindings)
+         groups []]
+    (if-not bindings
+      groups
+      (let [[binding source & more] bindings
+            [mods more] (loop [xs more mods []]
+                          (if (keyword? (first xs))
+                            (recur (nnext xs) (conj mods [(first xs) (second xs)]))
+                            [mods xs]))]
+        (when (nil? source)
+          (throw (IllegalArgumentException. "Async binding forms require an even binding/source pair.")))
+        (recur more (conj groups {:binding binding
+                                  :source source
+                                  :mods mods}))))))
+
+(defn- apply-async-for-mods
+  "Wraps an emitted async-iteration body with its :let, :when, and :while
+   modifiers."
+  [mods body]
+  (reduce
+   (fn [body [k expr]]
+     (case k
+       :let `(let ~expr ~body)
+       :when `(when ~expr ~body)
+       :while `(if ~expr
+                 ~body
+                 (throw (async-iteration-stop)))
+       (throw (IllegalArgumentException.
+               (str "Unsupported async iteration modifier: " k)))))
+   body
+   (reverse mods)))
+
+(defn- emit-async-for
+  "Emits nested async iteration for parsed binding groups, including lifecycle
+   cleanup when channel consumption ends early."
+  [groups body]
+  (if-let [{:keys [binding source mods]} (first groups)]
+    (let [source-sym (gensym "source")
+          item-sym (gensym "item")
+          normal-sym (gensym "normal")
+          inner (emit-async-for (next groups) body)
+          channel-body (apply-async-for-mods mods `(do ~inner))
+          coll-body (apply-async-for-mods mods inner)
+          channel-branch `(let [~normal-sym (atom false)]
+                            (try
+                              (loop []
+                                (let [~item-sym (await* ~source-sym)]
+                                  (if (nil? ~item-sym)
+                                    (reset! ~normal-sym true)
+                                    (let [~binding (await ~item-sym)]
+                                      ~channel-body
+                                      (recur)))))
+                              (finally
+                                (when-not @~normal-sym
+                                  (detach (await (areturn ~source-sym)))))))
+          coll-branch `(doseq [~item-sym (source-items ~source-sym)]
+                         (let [~binding (await ~item-sym)]
+                           ~coll-body))]
+      `(let [~source-sym (->promise-chan ~source)]
+         (if (chan? ~source-sym)
+           ~channel-branch
+           ~coll-branch)))
+    `(do ~@body)))
+
+(defmacro adoseq
+  "Asynchronously consumes channel-like or collection-like sources for side
+   effects, returning a promise-chan that settles to nil.
+
+   Binding forms follow Clojure doseq/for style for destructuring, nested
+   bindings, :let, :when, and :while. Each element is consumed with await
+   semantics. On :while short-circuit, errors, or cancellation,
+   lifecycle-aware sources are returned/cleaned up; borrowed plain channels are
+   only observed."
+  [bindings & body]
+  `(async
+     (try
+       ~(emit-async-for (parse-async-for-bindings bindings) body)
+       nil
+       (catch Throwable t#
+         (when-not (async-iteration-stopped? t#)
+           (throw t#))
+         nil))))
+
+(defmacro afor
+  "Asynchronously comprehends over channel-like or collection-like sources,
+   returning a promise-chan settled with an eager vector of body results.
+
+   Supports the same binding and qualifier forms as adoseq. Body-returned
+   reduced values are ordinary values; use :while for short-circuiting."
+  [bindings & body]
+  `(async
+     (let [results# (atom [])]
+       (await
+        (adoseq ~bindings
+          (swap! results# conj (do ~@body))))
+       @results#)))
 
 (defmacro ado
   "Asynchronous do. Execute expressions one after the other, awaiting the result

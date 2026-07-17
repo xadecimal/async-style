@@ -1,5 +1,5 @@
 (ns com.xadecimal.async-style-test
-  (:refer-clojure :exclude [await time])
+  (:refer-clojure :exclude [areduce await time])
   (:require [clojure.test :refer [deftest is]]
             [clojure.core.async :as ca]
             [com.xadecimal.async-style :as a :refer :all]
@@ -1783,6 +1783,459 @@ to nil."
          (async
            (q! (await (all []))))
          (is (nil? (dq!)))))
+
+
+(deftest async-generator-tests
+  (testa "async-generator returns a core.async-compatible channel."
+         (let [source (async-generator
+                        (yield :a)
+                        (yield :b))]
+           (is (= :a (ca/<!! source)))
+           (is (= :b (ca/<!! source)))
+           (is (nil? (ca/<!! source)))))
+
+  (testa "yield is only valid inside async-generator."
+         (is (thrown? IllegalStateException
+                      (wait (async (yield :outside-generator))))))
+
+  (testa "async-generator defaults to unbuffered pull behavior."
+         (let [source (async-generator
+                        (q! :starting)
+                        (yield 1)
+                        (q! :after-first-yield))]
+           (impl/ensure-started! source)
+           (is (= :starting (dq!)))
+           (is (= :timeout (dq! 50)))
+           (is (= 1 (ca/<!! source)))
+           (is (= :timeout (dq! 50)))
+           (is (nil? (wait (areturn source))))))
+
+  (testa "async-generator can run ahead with an explicit buffer."
+         (let [source (async-generator
+                        {:buffer-size 1}
+                        (q! :starting)
+                        (yield 1)
+                        (q! :after-first-yield))]
+           (impl/ensure-started! source)
+           (is (= :starting (dq!)))
+           (is (= :after-first-yield (dq!)))
+           (is (= 1 (ca/<!! source)))))
+
+  (testa "ainto consumes an async generator in order."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield (async 2))
+                        (yield (future 3)))]
+           (is (= [1 2 3] (wait (ainto [] source))))))
+
+  (testa "adoseq exits on :while and waits for generator cleanup."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (finally
+                          (q! :generator-cleaned)))]
+           (is (nil? (wait (adoseq [x source
+                                     :while (< x 2)]
+                             (q! x)))))
+           (is (= #{1 :generator-cleaned}
+                  (set [(dq!) (dq!)])))))
+
+  (testa "Borrowed plain channels are observed only on early exit."
+         (let [source (ca/chan 1)]
+           (ca/>!! source 1)
+           (is (nil? (wait (adoseq [x source
+                                     :while false]
+                             (q! x)))))
+           (is (true? (ca/>!! source 2)))
+           (is (= 2 (ca/<!! source)))
+           (ca/close! source))))
+
+
+(deftest async-generator-settlement-tests
+  (testa "Returning an async-generator from async preserves the source channel."
+         (let [ret (async
+                     (async-generator
+                       (q! :returned-generator-started)
+                       (yield 1)))
+               source (wait ret)]
+           (is (#'impl/chan? source))
+           (is (= :timeout (dq! 50)))
+           (is (= 1 (wait (anext source))))
+           (is (= :returned-generator-started (dq!)))
+           (is (nil? (wait (areturn source))))))
+
+  (testa "Returning an async-generator from blocking and compute preserves the source channel."
+         (let [blocking-source (wait (blocking
+                                       (async-generator
+                                         (yield :blocking-source))))
+               compute-source (wait (compute
+                                      (async-generator
+                                        (yield :compute-source))))]
+           (is (#'impl/chan? blocking-source))
+           (is (#'impl/chan? compute-source))
+           (is (= :blocking-source (wait (anext blocking-source))))
+           (is (= :compute-source (wait (anext compute-source))))
+           (is (nil? (wait (areturn blocking-source))))
+           (is (nil? (wait (areturn compute-source))))))
+
+  (testa "First consumption of a returned generator owns its producer."
+         (let [ret (async
+                     (async-generator
+                       (yield 1)
+                       (await (sleep 500)
+                              (catch InterruptedException _
+                                nil))
+                       (finally
+                         (q! :returned-generator-cleaned))))
+               source (wait ret)
+               consumer (async
+                          (adoseq [x source]
+                            (q! x)
+                            (await (sleep 500)
+                                   (catch InterruptedException _
+                                     nil))))]
+           (is (= 1 (dq!)))
+           (cancel! consumer :consumer-cancelled)
+           (is (= :consumer-cancelled (wait* consumer)))
+           (is (= :returned-generator-cleaned (dq!)))))
+
+  (testa "Cancelling the creator after it returned does not cancel an unconsumed generator."
+         (let [creator (async
+                         (async-generator
+                           (q! :late-started)
+                           (yield :late-value)
+                           (finally
+                             (q! :late-cleaned))))
+               source (wait creator)]
+           (cancel! creator :too-late)
+           (is (= :timeout (dq! 50)))
+           (is (= :late-value (wait (anext source))))
+           (is (= :late-started (dq!)))
+           (is (nil? (wait (areturn source))))
+           (is (= :late-cleaned (dq!)))))
+
+  (testa "Nested promise-like async values still compose through settlement."
+         (is (= 6 (wait (future (future (future 6))))))
+         (is (= 6 (wait (async (async (async 6)))))))
+
+  (testa "Returning a borrowed raw channel preserves it as a value."
+         (let [source (ca/chan 1)
+               ret (async source)
+               returned (wait ret)]
+           (is (identical? source returned))
+           (is (true? (ca/>!! source :raw-value)))
+           (is (= :raw-value (ca/<!! source)))
+           (ca/close! source))))
+
+
+(deftest async-manual-lifecycle-tests
+  (testa "anext starts a cold generator and returns one raw value."
+         (let [source (async-generator
+                        (q! :manual-started)
+                        (yield :value))]
+           (is (= :timeout (dq! 50)))
+           (is (= :value (wait (anext source))))
+           (is (= :manual-started (dq!)))
+           (is (nil? (wait (areturn source))))))
+
+  (testa "anext returns nil when the generator is done."
+         (let [source (async-generator
+                        (yield :only))]
+           (is (= :only (wait (anext source))))
+           (is (nil? (wait (anext source))))))
+
+  (testa "Default async-generator has no runahead after one anext."
+         (let [source (async-generator
+                        (q! :starting)
+                        (yield 1)
+                        (q! :after-first-yield))]
+           (is (= 1 (wait (anext source))))
+           (is (= :starting (dq!)))
+           (is (= :timeout (dq! 50)))
+           (is (nil? (wait (areturn source))))))
+
+  (testa "Explicit buffer allows one value of runahead after one anext."
+         (let [source (async-generator
+                        {:buffer-size 1}
+                        (q! :starting)
+                        (yield 1)
+                        (q! :after-first-yield))]
+           (is (= 1 (wait (anext source))))
+           (is (= :starting (dq!)))
+           (is (= :after-first-yield (dq!)))
+           (is (nil? (wait (areturn source))))))
+
+  (testa "async generators cannot yield nil because nil means done."
+         (let [source (async-generator
+                        (yield nil))]
+           (is (instance? IllegalArgumentException
+                          (wait* (anext source))))))
+
+  (testa "Cancelled anext does not consume from a borrowed plain channel."
+         (let [source (ca/chan 1)
+               step (anext source)]
+           (cancel! step)
+           (is (instance? CancellationException (wait* step)))
+           (is (true? (ca/>!! source :kept)))
+           (is (= :kept (ca/<!! source)))
+           (ca/close! source))))
+
+
+(deftest async-manual-return-tests
+  (testa "areturn runs generator finally and is idempotent."
+         (let [source (async-generator
+                        (yield 1)
+                        (finally
+                          (q! :manual-cleaned)))]
+           (is (= 1 (wait (anext source))))
+           (is (nil? (wait (areturn source))))
+           (is (= :manual-cleaned (dq!)))
+           (is (nil? (wait (areturn source))))
+           (is (= :timeout (dq! 50)))))
+
+  (testa "areturn does not close or cancel borrowed plain channels."
+         (let [source (ca/chan 1)]
+           (ca/>!! source :kept)
+           (is (nil? (wait (areturn source))))
+           (is (= :kept (ca/<!! source)))
+           (is (true? (ca/>!! source :after-return)))
+           (is (= :after-return (ca/<!! source)))
+           (ca/close! source)))
+
+  (testa "Manual anext twice then areturn works."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (yield 3)
+                        (finally
+                          (q! :manual-two-cleaned)))]
+           (is (= 1 (wait (anext source))))
+           (is (= 2 (wait (anext source))))
+           (is (nil? (wait (areturn source))))
+           (is (= :manual-two-cleaned (dq!))))))
+
+
+(deftest async-generator-cancel-lifecycle-tests
+  (testa "cancel! on a started async-generator requests lifecycle cleanup."
+         (let [source (async-generator
+                        (yield 1)
+                        (await (sleep 500)
+                               (catch InterruptedException _
+                                 nil))
+                        (finally
+                          (q! :cancel-generator-cleaned)))]
+           (is (= 1 (wait (anext source))))
+           (is (true? (cancel! source)))
+           (is (= :cancel-generator-cleaned (dq!)))))
+
+  (testa "cancel! on an unstarted async-generator is safe and idempotent."
+         (let [source (async-generator
+                        (q! :cancel-unstarted-started)
+                        (yield 1)
+                        (finally
+                          (q! :cancel-unstarted-cleaned)))]
+           (is (true? (cancel! source)))
+           (is (true? (cancel! source)))
+           (is (= :timeout (dq! 50)))))
+
+  (testa "cancel! unblocks a generator paused after an unbuffered yield."
+         (let [source (async-generator
+                        (yield :first)
+                        (q! :after-yield)
+                        (finally
+                          (q! :paused-generator-cleaned)))]
+           (is (= :first (wait (anext source))))
+           (is (= :timeout (dq! 50)))
+           (is (true? (cancel! source)))
+           (is (= :paused-generator-cleaned (dq!)))
+           (is (= :timeout (dq! 50)))))
+
+  (testa "areturn still waits for generator finalization."
+         (let [cleanup-started (ca/promise-chan)
+               release-cleanup (ca/promise-chan)
+               source (async-generator
+                        (yield :first)
+                        (finally
+                          (ca/>! cleanup-started true)
+                          (ca/<! release-cleanup)
+                          (q! :areturn-waited-cleanup)))]
+           (is (= :first (wait (anext source))))
+           (let [ret (areturn source)]
+             (is (true? (ca/<!! cleanup-started)))
+             (is (= :timeout (dq! 50)))
+             (ca/>!! release-cleanup true)
+             (is (nil? (wait ret)))
+             (is (= :areturn-waited-cleanup (dq!))))))
+
+  (testa "close! is only a raw channel close, not lifecycle cleanup."
+         (let [source (async-generator
+                        (q! :close-started)
+                        (yield :value)
+                        (finally
+                          (q! :close-cleaned)))]
+           (ca/close! source)
+           (is (= :timeout (dq! 50)))
+           (is (nil? (wait (areturn source)))))))
+
+
+(deftest async-iteration-consumer-tests
+
+  (testa "afor consumes collection-like sources and awaits async-style elements."
+         (is (= [2 4 6]
+                (wait (afor [x [(async 1) (future 2) 3]
+                             :let [y (* x 2)]
+                             :when (even? y)]
+                        y)))))
+
+  (testa "Async iteration supports arrays and Java iterables."
+         (is (= [2 4 6]
+                (wait (afor [x (int-array [1 2 3])]
+                        (* x 2)))))
+         (let [items (doto (java.util.ArrayList.)
+                       (.add (async 1))
+                       (.add (future 2))
+                       (.add 3))]
+           (is (= [1 2 3] (wait (ainto [] items))))))
+
+  (testa "areduce short-circuits with reduced and cleans up lifecycle-aware sources."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (finally
+                          (q! :reduced-cleaned)))]
+           (is (= 1 (wait (areduce (fn [_ x] (reduced x)) nil source))))
+           (is (= :reduced-cleaned (dq!)))))
+
+  (testa "atransduce and ainto follow Clojure transducer result semantics."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (yield 3))]
+           (is (= [2 4]
+                  (wait (atransduce (comp (filter odd?)
+                                          (map inc))
+                                    conj
+                                    []
+                                    source)))))
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (yield 3))]
+           (is (= #{1 3}
+                  (wait (ainto #{} (filter odd?) source)))))))
+
+
+(deftest async-iteration-error-tests
+
+  (testa "atransduce cleans up lifecycle-aware sources when a step throws."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (finally
+                          (q! :atransduce-error-cleaned)))
+               ret (wait* (atransduce (map (fn [x]
+                                              (if (= x 1)
+                                                (throw (ex-info "xf failed" {}))
+                                                x)))
+                                      conj
+                                      []
+                                      source))]
+           (is (instance? ExceptionInfo ret))
+           (is (= :atransduce-error-cleaned (dq!))))))
+
+
+(deftest async-generator-detach-tests
+
+  (testa "detach allows eager generator consumption to outlive parent completion."
+         (let [source (async-generator
+                        (await (sleep 50))
+                        (yield :detached-generator-value)
+                        (finally
+                          (q! :detached-generator-cleaned)))
+               parent (async
+                        (detach
+                          (async
+                            (adoseq [x source]
+                              (q! x))))
+                        :parent-done)]
+           (is (= :parent-done (wait parent)))
+           (is (= #{:detached-generator-value
+                    :detached-generator-cleaned}
+                  (set [(dq!) (dq!)]))))))
+
+
+(deftest async-generator-observation-tests
+
+  (testa "Observation combinators consume generator channels without taking source ownership."
+         (let [race-source (async-generator (yield :race))
+               any-source (async-generator (yield :any))
+               all-source (async-generator (yield :all))
+               settled-source (async-generator (yield :settled))
+               timeout-source (async-generator (yield :timeout))]
+           (is (= :race (wait (race [race-source (sleep 100)]))))
+           (is (= :any (wait (any [any-source (async (throw (ex-info "nope" {})))]))))
+           (is (= [:all :other] (wait (all [all-source (async :other)]))))
+           (is (= [:settled :other] (wait (all-settled [settled-source (async :other)]))))
+           (is (= :timeout (wait (timeout timeout-source 100)))))))
+
+
+(defn- test-doubled-source
+  [source]
+  (async-generator
+    (loop []
+      (let [x (await* source)]
+        (when-not (nil? x)
+          (yield (* x 2))
+          (recur))))
+    (finally
+      (when-some [cleanup (impl/source-cleanup-chan source)]
+        (detach (await cleanup)))
+      (q! :transformer-cleaned))))
+
+
+(deftest async-generator-structured-tests
+
+  (testa "Parent cancellation while consuming a generator runs generator cleanup."
+         (let [source (async-generator
+                        (yield :started)
+                        (await (sleep 500))
+                        (finally
+                          (q! :parent-cancel-cleaned)))
+               parent (async
+                        (adoseq [x source]
+                          (q! x)
+                          (await (sleep 500))))]
+           (is (= :started (dq!)))
+           (cancel! parent :parent-cancelled)
+           (is (= :parent-cancelled (wait* parent)))
+           (is (= :parent-cancel-cleaned (dq!)))))
+
+  (testa "Parent completion cancels an unfinished generator producer."
+         (let [parent (async
+                        (let [source (async-generator
+                                       (yield :parent-completion-started)
+                                       (await (sleep 500))
+                                       (finally
+                                         (q! :parent-completion-cleaned)))]
+                          (q! (await source))
+                          :parent-done))]
+           (is (= :parent-done (wait parent)))
+           (is (= #{:parent-completion-started
+                    :parent-completion-cleaned}
+                  (set [(dq!) (dq!)])))))
+
+  (testa "Early downstream exit cascades cleanup through transformer generators."
+         (let [source (async-generator
+                        (yield 1)
+                        (yield 2)
+                        (finally
+                          (q! :source-cleaned)))
+               doubled (test-doubled-source source)]
+           (is (nil? (wait (adoseq [x doubled
+                                     :while false]
+                             (q! x)))))
+           (is (= #{:source-cleaned :transformer-cleaned}
+                  (set [(dq!) (dq!)]))))))
 
 
 (deftest ado-tests

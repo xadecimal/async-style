@@ -16,6 +16,7 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
   - [Awaiting](#awaiting-await-wait-await-wait)
   - [Promise coercion](#promise-coercion)
   - [Producer settlement](#producer-settlement)
+  - [Async iteration](#async-iteration)
   - [Errors](#errors)
   - [Cancellation](#cancellation)
 - [API Overview](#api-overview)
@@ -33,6 +34,7 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
 - **Flexible Execution Pools:** Optimized for I/O-bound, compute-heavy, and lightweight tasks.
 - **Cancellation Support:** Easily cancel asynchronous operations, ensuring efficient resource management.
 - **Comprehensive Utilities:** Timeout, sleep, chaining tasks, racing tasks, and more.
+- **Async Iteration:** JS-like async generators plus `adoseq`, `afor`, `areduce`, `atransduce`, and `ainto`.
 
 ---
 
@@ -166,8 +168,7 @@ higher-order functions in JS, so it doesn't feel as restrictive. Once core.async
 `await*` / `wait*` are variants that return the exception as a value, instead of throwing.
 
 `await` and `wait` accept core.async channels, async-style promise-chans, plain values, and values supported by `IntoPromiseChan`.
-They take one async value and return the value settled by its producer. They do not recursively flatten arbitrary raw channels
-that yield more channels.
+They explicitly take from channel-like inputs. If a producer settled to a source channel as its value, `await` / `wait` of that producer returns the source channel itself.
 
 ### Promise coercion
 
@@ -182,14 +183,85 @@ Most async-style APIs call `->promise-chan` for their inputs, so helpers such as
 
 ### Producer settlement
 
-When `async`, `blocking`, or `compute` returns a supported async value, async-style waits one level before settling the producer's result channel.
-This keeps the producer's lifetime aligned with its returned value:
+When `async`, `blocking`, or `compute` returns a promise-like single-result async value, async-style waits one level before settling the producer's result channel.
+This keeps the producer's lifetime aligned with returned promise-like values:
 
 ```clojure
 (wait (async (async (async 1)))) ; => 1
 ```
 
-Nested async-style producers still compose because each producer waits one level before it settles. Raw channels that themselves yield more channels are not recursively flattened by settlement.
+Nested async-style producers still compose because each producer waits one promise-like level before it settles. Multi-value source channels are different: returning an `async-generator` or ordinary raw channel settles to the channel itself. The source is not consumed by settlement, and a cold generator's producer starts only when that returned channel is later consumed.
+
+### Async iteration
+
+`async-generator` is the many-value counterpart to `async`. It returns a cold core.async-compatible channel-like value. The generator body starts when the returned channel is consumed, not when the generator is created.
+
+```clojure
+(defn ticks []
+  (async-generator
+    (yield "starting")
+    (await (sleep 100))
+    (yield "middle")
+    (await (sleep 100))
+    (yield "done")
+    (finally
+      (println "cleanup"))))
+
+(async
+  (adoseq [tick (ticks)
+           :while (not= tick "done")]
+    (println tick)))
+```
+
+Values yielded by `yield` are raw channel values. Channel close means the generator is done. `yield` applies async-style value semantics before publishing, so yielding `(async 1)`, a `Future`, or a `CompletableFuture` exposes the settled value to consumers. Because async-style stays channel-first, generators cannot yield `nil`; a `nil` take means done.
+
+If the generator body fails, its `Throwable` is delivered through the output channel before that channel closes. Await-aware consumers rethrow it using normal async-style error semantics, and generator `finally` cleanup still runs. Lifecycle cancellation and `areturn` cleanup do not publish their internal interruption signals as source values.
+
+The async iteration consumers are:
+
+- `anext`: manually take one raw value; settles to `nil` when done.
+- `areturn`: manually request early cleanup and wait for generator `finally`.
+- `adoseq`: async `doseq` for side effects; settles to `nil`.
+- `afor`: async eager `for`; settles to a vector of body results.
+- `areduce`: async reduce; `(reduced v)` short-circuits and settles to `v`.
+- `atransduce`: async transduce with lifecycle-aware early cleanup.
+- `ainto`: async `into`, optionally with a transducer.
+
+`adoseq` and `afor` support destructuring, nested bindings, `:let`, `:when`, and `:while`. Async iteration consumers can consume channel-like sources or collection-like sources, including Clojure seqables, JVM arrays, and `java.lang.Iterable` values. Collection elements are awaited, so this works:
+
+```clojure
+(wait (afor [x [(async 1) (future 2) 3]
+             :let [y (* x 2)]]
+        y))
+;; => [2 4 6]
+```
+
+Manual stepping is available when a caller wants explicit lifecycle control:
+
+```clojure
+(let [source (ticks)]
+  (println (wait (anext source)))
+  (println (wait (anext source)))
+  (wait (areturn source))) ; runs generator finally
+```
+
+`anext` only supports channel-like sources for now. It starts a cold generator if needed, observes borrowed plain channels without closing or cancelling them, and returns a promise-chan that settles to the next raw value or `nil` when the source is done. It does not return a JS-style `{done?, value}` map. `areturn` is a no-op for borrowed plain channels.
+
+For async generators, `(cancel! source)` is lifecycle-aware fire-and-forget cancellation: it closes the output channel, unblocks paused yields, cancels the producer if it started, and lets generator `catch` / `finally` run. Use `areturn` when you need to wait until `finally` / finalization has completed. `close!` on a generator is only the lower-level raw channel close operation, not the lifecycle cleanup API.
+
+Async generators use fixed, lossless buffering:
+
+```clojure
+(async-generator
+  {:buffer-size 32}
+  (yield :event))
+```
+
+The default buffer size is `0`, which means an unbuffered, JS-like pull handoff: after a consumer takes a yielded value, `yield` does not return and code after it does not run until the consumer asks for another value or calls `areturn`. Use a positive `:buffer-size` when you want bounded runahead. Dropping and sliding buffers are intentionally not part of `async-generator`, because a generator models a lossless sequence. Use an explicit core.async channel adapter for push/event sources that need lossy buffering.
+
+Async iteration follows the same ownership rule as the rest of async-style. Creating or returning a cold generator does not start work. Consuming it starts its producer in the current scope, making that producer an owned child of the consuming scope. Early `areturn`, `adoseq`, `afor`, `areduce`, `atransduce`, or `ainto` exit calls generator cleanup and waits for `finally` to run. Borrowed plain channels are only observed; they are not closed or cancelled.
+
+Reducing functions and transducer steps passed to `areduce`, `atransduce`, and `ainto` run inside async-pool orchestration code. Keep them quick and synchronous. Do not block, park, `await`, `wait`, perform I/O, or do heavy compute there; wrap that work in `blocking`, `compute`, `adoseq`, `afor`, or an `async-generator` first.
 
 ### Errors
 
@@ -325,7 +397,7 @@ Only direct children are registered on a parent. Transitive cancellation happens
 
 Observation does not create ownership. Passing an already-started promise, channel, `Future`, or `CompletableFuture` to `await`, `wait`, `timeout`, `race`, `any`, `all`, or `all-settled` observes it without making it a child of the current scope. Internal watcher logic, when used, belongs to the current operation but does not transfer ownership of the watched input.
 
-Producer settlement and scope lifetime are tied together. If a producer returns a supported async value, the producer waits one level for that value before settling its own result channel. Cleanup of unfinished owned children happens only after the producer's result channel is actually settled. Nested async-style producers compose because each producer performs this one-level wait; raw channels that yield more channels are not recursively flattened.
+Producer settlement and scope lifetime are tied together. If a producer returns a promise-like single-result async value, the producer waits one level for that value before settling its own result channel. Cleanup of unfinished owned children happens only after the producer's result channel is actually settled. Nested async-style producers compose because each producer performs this one-level wait. Multi-value source channels, including async generators and ordinary raw channels, are preserved as values; first consumption owns any cold generator producer.
 
 Borrowed work keeps its original owner:
 
@@ -378,7 +450,7 @@ Returning a combinator does not make the combinator own borrowed inputs. It only
   (cancel! ch)              ; cancel with CancellationException
   (cancel! ch custom-val)   ; cancel with custom-val (must not be nil)
   ```
-  Marks the promise‑chan `ch` as cancelled. If the block hasn’t started, it immediately fulfills; otherwise it waits for you to check.
+  Marks the promise‑chan `ch` as cancelled. If the block hasn’t started, it immediately fulfills; otherwise it waits for you to check. On lifecycle-aware async-style sources such as async generators, `cancel!` requests source cleanup and returns immediately; use `areturn` to wait for cleanup.
 
 - **`cancelled?`**
   ```clojure
@@ -434,6 +506,8 @@ Returning a combinator does not make the combinator own borrowed inputs. It only
 | `blocking`       | Run code on blocking‑pool                        |
 | `compute`        | Run code on compute‑pool                         |
 | `detach`         | Start work outside the current ownership scope   |
+| `async-generator`| Create a cold channel-like async source          |
+| `yield`          | Publish one value from inside `async-generator`  |
 | `->promise-chan` | Coerce supported async values to promise‑chans   |
 | `sleep`          | `async` sleep for _ms_                           |
 | `defer`          | delay execution by _ms_ then fulfill value or fn |
@@ -473,6 +547,20 @@ Notes:
 - Passing a plain value treats it as already available. The current implementation may return the first available plain value, but callers should not rely on any ordering among already available values.
 - `all` and `any` short-circuit their returned promise-chan, but that is observation only. They do not cancel borrowed unfinished inputs.
 - If every input to `any` errors, it settles with an `ex-info` whose data includes `{:type :all-errored, :errors [...]}`.
+
+### Async Iteration
+
+| Function / Macro  | Description                                                                 |
+|-------------------|-----------------------------------------------------------------------------|
+| `async-generator` | Cold async source that yields many raw values over a core.async channel      |
+| `yield`           | Publish one settled async-style value from inside an async generator         |
+| `anext`           | Take one raw value from a channel-like source, or `nil` when done            |
+| `areturn`         | Request lifecycle-aware source cleanup and wait for finalization             |
+| `adoseq`          | Async `doseq`; consumes sources for side effects and settles to `nil`        |
+| `afor`            | Async eager `for`; collects body results into a vector                       |
+| `areduce`         | Async reduce with lifecycle-aware early cleanup                             |
+| `atransduce`      | Async transduce over a channel-like or collection-like source                |
+| `ainto`           | Async `into`, with optional transducer support                               |
 
 ### Helpers: `ado`, `alet`, `clet`, `time`
 

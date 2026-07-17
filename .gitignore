@@ -14,3 +14,5 @@ pom.xml.asc
 .cpcache/
 .lsp/
 .clj-kondo/
+.DS_Store
+.rebel_readline_history

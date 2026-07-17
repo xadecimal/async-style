@@ -16,11 +16,11 @@
     compute: asynchronously running on the compute-pool, use it for running heavy computation, don't block it
     settle(d): when a channel is delivered a value and closed, or in the case of a promise-chan, it means the promise-chan was fulfilled and will forever return the same value every time it is taken for and additional puts are ignored.
     fulfill(ed): when a channel is delivered a value, but not necessarily closed
-    join(ed): async-style producers join one returned promise/channel before settling, so result channels settle to values rather than nested promise-chans
+    join(ed): async-style producers join one returned promise-like single-result value before settling, so result channels settle to values rather than nested promise-chans; multi-value source channels are preserved
     async-pool: the core.async go block executor, it is fixed size, defaulting to 8 threads, don't soft or hard block it
     blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
     compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
-  (:refer-clojure :exclude [await time])
+  (:refer-clojure :exclude [areduce await time])
   (:require [com.xadecimal.async-style.impl :as impl]
             [com.xadecimal.async-style.protocols :as proto]))
 
@@ -70,6 +70,11 @@
    The way cancellation is conveyed is by settling the return channel of async,
    blocking and compute blocks to a CancellationException, unless passed a v
    explicitly, in which case it will settle it with v.
+
+   When called on a lifecycle-aware async-style source, such as an
+   async-generator, it requests lifecycle cleanup using the same path as areturn.
+   This is fire-and-forget; use areturn when you need to wait for cleanup and
+   finally blocks to finish.
 
    That means by default a block that has its execution cancelled will return a
    CancellationException and thus awaiters and other takers of its result will
@@ -404,6 +409,129 @@
     * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all chans)))
+
+(defmacro async-generator
+  "Creates a cold async-style channel whose body can yield many values.
+
+   The body runs on the async-pool when the returned channel is first consumed,
+   not when the channel is created. Values published with yield are delivered as
+   raw channel values, and channel close means the generator is done.
+
+   Accepts an optional options map. Currently supported:
+     * :buffer-size - fixed, lossless output buffer size. Defaults to 0 for an
+       unbuffered, pull-based handoff.
+
+   Supports implicit trailing catch/finally forms like async, blocking, and
+   compute."
+  {}
+  ([& body] ` (com.xadecimal.async-style.impl/async-generator ~@body)))
+
+(defmacro yield
+  "Publishes one value from inside async-generator.
+
+   The value is consumed through await before it is put on the output channel, so
+   yielding a promise-chan, Future, or CompletableFuture exposes its settled
+   value to downstream consumers. yield parks when the configured generator
+   buffer is full and returns nil on success.
+
+   async-generator cannot yield nil, because nil is core.async's closed-channel
+   value and means the source is done."
+  {}
+  ([v] ` (com.xadecimal.async-style.impl/yield ~v)))
+
+(defn anext
+  "Takes one raw value from channel-like source, returning a promise-chan.
+
+   If source is a cold async-style generator, taking starts it in the current
+   scope. The returned promise-chan settles to the next value, or nil when the
+   source is done. Errors are represented using normal async-style semantics:
+   use wait/await to throw them, or wait*/await* to receive them as values.
+
+   anext observes borrowed plain channels without closing or cancelling them.
+   Collection-like sources are not supported."
+  {:inline (fn ([source] ` (com.xadecimal.async-style.impl/anext ~source)))}
+  ([source] (com.xadecimal.async-style.impl/anext source)))
+
+(defn areturn
+  "Requests early cleanup for a lifecycle-aware async-style source.
+
+   Returns a promise-chan settling to nil after cleanup has completed. For
+   borrowed plain channels, areturn is a no-op: it does not close or cancel the
+   channel."
+  {:inline (fn ([source] ` (com.xadecimal.async-style.impl/areturn ~source)))}
+  ([source] (com.xadecimal.async-style.impl/areturn source)))
+
+(defmacro adoseq
+  "Asynchronously consumes channel-like or collection-like sources for side
+   effects, returning a promise-chan that settles to nil.
+
+   Binding forms follow Clojure doseq/for style for destructuring, nested
+   bindings, :let, :when, and :while. Each element is consumed with await
+   semantics. On :while short-circuit, errors, or cancellation,
+   lifecycle-aware sources are returned/cleaned up; borrowed plain channels are
+   only observed."
+  {}
+  ([bindings & body]
+   `
+   (com.xadecimal.async-style.impl/adoseq ~bindings ~@body)))
+
+(defmacro afor
+  "Asynchronously comprehends over channel-like or collection-like sources,
+   returning a promise-chan settled with an eager vector of body results.
+
+   Supports the same binding and qualifier forms as adoseq. Body-returned
+   reduced values are ordinary values; use :while for short-circuiting."
+  {}
+  ([bindings & body] ` (com.xadecimal.async-style.impl/afor ~bindings ~@body)))
+
+(defn areduce
+  "Asynchronously reduces source with rf and init, returning a promise-chan
+   settled with the final accumulator.
+
+   source may be channel-like or collection-like. Each element is consumed with
+   await semantics, so Throwable values are thrown and values supported by
+   IntoPromiseChan are awaited. If rf returns reduced, reduction stops early,
+   lifecycle-aware sources are returned/cleaned up, and the promise-chan settles
+   with the unwrapped reduced value.
+
+   rf runs on the async-pool and should be quick: do not block, park, wait, or
+   perform heavy compute work inside it."
+  {:inline (fn
+             ([rf init source]
+              `
+              (com.xadecimal.async-style.impl/areduce ~rf ~init ~source)))}
+  ([rf init source] (com.xadecimal.async-style.impl/areduce rf init source)))
+
+(defn atransduce
+  "Asynchronously transduces source with xf, rf, and init, returning a
+   promise-chan settled with the completed reduction result.
+
+   source may be channel-like or collection-like. Early transducer completion,
+   errors, and cancellation return/clean up lifecycle-aware sources. Transducer
+   and reducing steps run on the async-pool and should be quick; do not block,
+   park, wait, or perform heavy compute work inside them."
+  {:inline
+     (fn
+       ([xf rf init source]
+        `
+        (com.xadecimal.async-style.impl/atransduce ~xf ~rf ~init ~source)))}
+  ([xf rf init source]
+   (com.xadecimal.async-style.impl/atransduce xf rf init source)))
+
+(defn ainto
+  "Asynchronously consumes source into to, returning a promise-chan settled with
+   the completed collection.
+
+   With two arguments, behaves like async into. With three arguments, applies xf
+   as a transducer. source may be channel-like or collection-like, and each
+   element is consumed with await semantics."
+  {:inline (fn
+             ([to source] ` (com.xadecimal.async-style.impl/ainto ~to ~source))
+             ([to xf source]
+              `
+              (com.xadecimal.async-style.impl/ainto ~to ~xf ~source)))}
+  ([to source] (com.xadecimal.async-style.impl/ainto to source))
+  ([to xf source] (com.xadecimal.async-style.impl/ainto to xf source)))
 
 (defmacro ado
   "Asynchronous do. Execute expressions one after the other, awaiting the result

@@ -23,6 +23,13 @@ Types of changes:
 - Added cancellation tests for direct and transitive parent-child propagation, parent completion/failure cleanup, borrowed observation, and detached work.
 - Added `bb test-vars` for running specific tests against both the default `core.async` version and the `:test-1.7` compatibility profile.
 - Added `:dev` alias with `-Djdk.attach.allowAttachSelf`.
+- Added `async-generator` for cold, channel-backed async sources that yield many values.
+- Added `yield` for publishing settled async-style values from inside `async-generator`.
+- Added `anext` and `areturn` for manual lifecycle-aware single-step async source consumption and cleanup.
+- Added `adoseq` and `afor` for JS-like async iteration with destructuring, nested bindings, and `:let`, `:when`, and `:while` modifiers.
+- Added `areduce`, `atransduce`, and `ainto` for lifecycle-aware async reductions and transductions.
+- Added channel-like and collection-like source support across async iteration consumers, including Clojure collections, JVM arrays, and `Iterable` values.
+- Added the concrete, core.async-compatible `AsyncGeneratorChannel` type with cold startup, lifecycle cleanup, metadata, and `datafy` support.
 
 ### Changed
 
@@ -33,11 +40,18 @@ Types of changes:
 - `race`, `any`, `all`, `all-settled`, and `timeout` observe borrowed inputs without taking ownership of or cancelling those inputs.
 - `race` and `any` no longer cancel losing inputs merely because another input settled first.
 - Locally started work passed to `race` / `any` / `all` remains owned by its parent scope and may be cancelled when that parent settles.
-- Producer settlement now waits one level when an `async`, `blocking`, or `compute` body returns a supported async value, so nested async-style producers compose while raw channels yielding channels are not recursively flattened.
+- Producer settlement now assimilates one level only for promise-like single-result async values, so nested async-style producers compose while multi-value source channels are preserved as values.
+- Returning an `async-generator` or ordinary raw channel from `async`, `blocking`, or `compute` now settles to the channel itself; cold generator producers start and become owned only on first consumption.
 - `await`, `wait`, `await*`, and `wait*` now accept values supported by `IntoPromiseChan` and rely on producer-side settlement rather than recursive consumer-side joining.
 - `Future`, `CompletableFuture`, and `IBlockingDeref` coercion now happens in a detached blocking task so observing borrowed async values does not create ownership in the current scope.
 - `race`, `any`, and `all` were refactored to use lightweight input observation and distributed completion accounting while keeping borrowed inputs observation-only.
 - `all` now stores results in an atom-backed vector for thread-safe concurrent observer updates.
+- Channel detection now recognizes async-style channel wrappers without relying on broad core.async implementation protocols.
+- Async iteration consumers now call generator cleanup and wait for `finally` on early exit, reduced completion, errors, or cancellation.
+- `cancel!` on async-generator channels now delegates to lifecycle cleanup as a fire-and-forget cancellation signal; `areturn` remains the API that waits for finalization.
+- `async-generator` now defaults to unbuffered pull behavior (`:buffer-size 0`); code after `yield` waits until the next pull or `areturn`, positive `:buffer-size` values provide fixed lossless runahead, and dropping/sliding push-source policies remain explicit user adapters.
+- Async generators publish raw non-nil values; channel close / nil take means done, so yielded `nil` is rejected instead of wrapped in a sentinel value.
+- Generator body failures are delivered as `Throwable` source values for await-aware consumers to rethrow, while lifecycle cancellation signals remain internal and generator `finally` cleanup still runs.
 - `bb release` now runs `bb gen` before tests and install.
 - Updated Clojure to `1.12.3`; core.async remains at `1.8.741` with compatibility testing against core.async `1.7.701`.
 
