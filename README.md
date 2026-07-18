@@ -92,13 +92,13 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
 ### Leiningen
 
 ```clojure
-[com.xadecimal/async-style "0.1.0"]
+[com.xadecimal/async-style "0.2.0"]
 ```
 
 ### Clojure CLI (deps.edn)
 
 ```clojure
-{:deps {com.xadecimal/async-style {:mvn/version "0.1.0"}}}
+{:deps {com.xadecimal/async-style {:mvn/version "0.2.0"}}}
 ```
 
 ---
