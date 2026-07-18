@@ -10,16 +10,22 @@
 ;;;; DO NOT MODIFY ;;;
 
 (ns com.xadecimal.async-style
-  "Definitions:
-    async: asynchronously running on the async-pool, await and others will park, use it for polling and small compute tasks
-    blocking: asynchronously running on the blocking-pool, use it for running blocking operations and blocking io
-    compute: asynchronously running on the compute-pool, use it for running heavy computation, don't block it
-    settle(d): when a channel is delivered a value and closed, or in the case of a promise-chan, it means the promise-chan was fulfilled and will forever return the same value every time it is taken for and additional puts are ignored.
-    fulfill(ed): when a channel is delivered a value, but not necessarily closed
-    join(ed): async-style producers join one returned promise-like single-result value before settling, so result channels settle to values rather than nested promise-chans; multi-value source channels are preserved
-    async-pool: the core.async go block executor, it is fixed size, defaulting to 8 threads, don't soft or hard block it
-    blocking-pool: the core.async thread block executor, it is caching, unbounded and not pre-allocated, use it for blocking operations and blocking io
-    compute-pool: the clojure.core Agent pooledExecutor, it is fixed size bounded to cpu cores + 2 and pre-allocated, use it for heavy computation, don't block it"
+  "Async/await-style concurrency and async iteration built on core.async.
+
+Choosing an execution:
+    async: use for async control flow, polling, and small or short computations; work may park, but must not block
+    compute: use for heavy or long-running computation; do not block
+    blocking: use for blocking I/O and other operations that block the current thread
+    Executor implementations vary with the core.async version and JVM configuration.
+
+Core terms:
+    settle(d): deliver one result and close the channel; settling nil closes without delivering because core.async channels cannot contain nil
+    fulfill(ed): deliver a value without closing the channel, leaving it open for additional values
+    promise-chan: a single-result core.async channel used for async-style execution results and cooperative cancellation
+    producer settlement: async, blocking, and compute wait for one returned promise-like single-result value before settling their own result; returned multi-value source channels remain channel values
+    ownership: starting async, blocking, or compute inside a running execution creates an owned child unless started inside detach; ending the parent cancels unfinished owned children
+    observation: awaiting or composing already-started work borrows it without transferring ownership or cancelling it
+    async source: async-generator returns a cold, lifecycle-aware multi-value channel; consumption starts its producer in the consuming scope, and channel close or a nil take means done"
   (:refer-clojure :exclude [areduce await time])
   (:require [com.xadecimal.async-style.impl :as impl]
             [com.xadecimal.async-style.protocols :as proto]))

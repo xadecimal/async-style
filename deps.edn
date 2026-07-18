@@ -1,6 +1,6 @@
 {:paths ["src"]
- :deps {org.clojure/clojure {:mvn/version "1.12.3"}
-        org.clojure/core.async {:mvn/version "1.8.741"}}
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+        org.clojure/core.async {:mvn/version "1.9.865"}}
  :aliases
  {:dev {:jvm-opts ["-Djdk.attach.allowAttachSelf"]}
   :test {:extra-paths ["test"]
