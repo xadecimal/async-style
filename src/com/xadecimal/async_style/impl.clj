@@ -914,9 +914,13 @@ they should short-circuit as soon as they can.")
              value-or-fn))))
 
 (defn timeout
-  "If chan fulfills before ms time has passed, return a promise-chan settled
-   with the result, else returns a promise-chan settled with a TimeoutException
-   or the result of timed-out-value-or-fn.
+  "Observes one result from chan before ms time has passed and returns a
+   promise-chan settled with that result. If the deadline wins, returns a
+   promise-chan settled with a TimeoutException or the result of
+   timed-out-value-or-fn.
+
+   Timing out only stops timeout's own observation. It does not close, cancel,
+   or lifecycle-return chan, so a many-valued channel remains usable.
 
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
@@ -927,19 +931,26 @@ they should short-circuit as soon as they can.")
   ([chan ms]
    (timeout chan ms (TimeoutException. (str "Channel timed out: " ms "ms."))))
   ([chan ms timed-out-value-or-fn]
-   (async (let [chan (->promise-chan chan)
-                deferred (defer ms ::timed-out)
-                joined-chan (async (await* chan))
-                res (first (a/alts! [joined-chan deferred]))]
-            (cond (= ::timed-out res)
-                  (do
-                    (cancel! joined-chan)
-                    (if (fn? timed-out-value-or-fn)
-                      (timed-out-value-or-fn)
-                      timed-out-value-or-fn))
-                  :else
-                  (do (cancel! deferred)
-                      res))))))
+   (let [ret (a/promise-chan)
+         chan (->promise-chan chan)]
+     (register-child! (when (cancellation-chan-bound?) *cancellation-chan*) ret)
+     (if (chan? chan)
+       (a/go
+         (let [timer (a/timeout ms)
+               [v selected] (a/alts! [ret chan timer] :priority true)]
+           (cond
+             (= selected chan)
+             (settle! ret v)
+
+             (= selected timer)
+             (settle! ret (try
+                            (if (fn? timed-out-value-or-fn)
+                              (timed-out-value-or-fn)
+                              timed-out-value-or-fn)
+                            (catch Throwable t
+                              t))))))
+       (settle-coerced! ret chan))
+     ret)))
 
 (defn- observe-until-settled!
   "Runs f with chan-or-value's result unless ret settles first. The second
@@ -961,24 +972,30 @@ they should short-circuit as soon as they can.")
     (settle! ret v)))
 
 (defn race
-  "Returns a promise-chan that settles as soon as one of the chan in chans
-   fulfill, with the value settled by that chan.
+  "Returns a promise-chan that settles with the first observed result from
+   chans. A many-valued channel contributes one next take, and a single shared
+   selection ensures losing many-valued channels are not consumed.
 
    Unlike any, this will also return the first error? to be returned by one of
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
+
+   Inputs are observed only; race does not close, cancel, or lifecycle-return
+   them.
 
   Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
   (let [ret (a/promise-chan)]
     (if (seq chans)
-      (let [chans (mapv ->promise-chan chans)]
-        (doseq [chan chans]
-          (observe-until-settled!
-           ret
-           chan
-           #(settle-observed! ret %1 %2))))
+      (let [inputs (mapv ->promise-chan chans)
+            available (some #(when-not (chan? %) [true %]) inputs)]
+        (if-some [[_ v] available]
+          (settle-coerced! ret v)
+          (a/go
+            (let [[v selected] (a/alts! (into [ret] inputs) :priority true)]
+              (when-not (= selected ret)
+                (settle! ret v))))))
       (settle! ret nil))
     ret))
 
@@ -992,6 +1009,9 @@ they should short-circuit as soon as they can.")
 
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
+
+   Each many-valued channel contributes at most one next take. Inputs are
+   observed only; any does not close, cancel, or lifecycle-return them.
 
   Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -1021,9 +1041,9 @@ they should short-circuit as soon as they can.")
     ret))
 
 (defn all-settled
-  "Takes a seqable of chans as an input, and returns a promise-chan that settles
-   after all of the given chans have fulfilled in ok? or error?, with a vector of
-   the taken ok? results and error? results of the input chans.
+  "Concurrently observes one result from each input in chans and returns a
+   promise-chan settled with a vector of the ok? and error? results in input
+   order. Many-valued channels contribute one next take.
 
    It is typically used when you have multiple asynchronous tasks that are not
    dependent on one another to complete successfully, or you'd always like to
@@ -1033,16 +1053,31 @@ they should short-circuit as soon as they can.")
    the tasks are dependent on each other / if you'd like to immediately stop upon
    any of them returning an error?.
 
-   Note:
+   Inputs are observed only; all-settled does not close, cancel, or
+   lifecycle-return them.
+
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   [chans]
-  (async
-    (loop [res [] chan (first chans) chans (next chans)]
-      (if chan
-        (recur (conj res (await* chan))
-               (first chans)
-               (next chans))
-        res))))
+  (let [ret (a/promise-chan)]
+    (try
+      (if (seq chans)
+        (let [chans (mapv ->promise-chan chans)
+              n (count chans)
+              results (atom (vec (repeat n nil)))
+              remaining (atom n)]
+          (doseq [[idx chan] (map-indexed vector chans)]
+            (observe-until-settled!
+             ret
+             chan
+             (fn [v _]
+               (swap! results assoc idx v)
+               (when (zero? (swap! remaining dec))
+                 (settle-coerced! ret @results))))))
+        (settle-coerced! ret []))
+      (catch Throwable t
+        (settle! ret t)))
+    ret))
 
 (defn all
   "Takes a seqable of chans as an input, and returns a promise-chan that settles
@@ -1052,6 +1087,10 @@ they should short-circuit as soon as they can.")
    chans (only values or empty). It settles in error? immediately upon any of the
    input chans returning an error? or non-chans throwing an error?, and will
    contain the error? of the first taken chan to return one.
+
+   Inputs are observed concurrently and many-valued channels contribute one
+   next take. All does not close, cancel, or lifecycle-return inputs when one
+   errors.
 
   Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -1443,9 +1482,12 @@ they should short-circuit as soon as they can.")
          (async ~body-form)))))
 
 (defmacro time
-  "Evaluates expr and prints the time it took. Returns the value of expr. If
-   expr evaluates to a channel, it waits for channel to fulfill before printing
-   the time it took.
+  "Evaluates expr and reports the time it took. Returns the original value of
+   expr. If expr evaluates to a channel, observes one result before reporting.
+
+   The timing callback is detached observation-only instrumentation. It does
+   not own or manage the observed value and is not suppressed merely because
+   the caller's cancellation scope completes.
 
    Note:
     * expr can return a channel or something supported by IntoPromiseChan."
@@ -1459,6 +1501,6 @@ they should short-circuit as soon as they can.")
                            ([] (~print-fn (/ (double (- (System/nanoTime) start#)) 1000000.0))))
             ret# ~(->promise-chan expr)]
         (if (~chan?- ret#)
-          (-> ret# (handle prn-time-fn#))
+          (detach (handle ret# prn-time-fn#))
           (prn-time-fn#))
         ret#))))

@@ -31,6 +31,8 @@ Types of changes:
 - Awaiting or composing already-started work does not transfer ownership. `timeout`, `race`, `any`, `all`, and `all-settled` observe borrowed inputs without cancelling them, and `race` and `any` do not cancel losing inputs. Work originally started inside the current parent remains owned by that parent.
 - `async`, `blocking`, and `compute` now wait for one returned promise-like single-result value before settling their own result promise-chan. Nested async-style producers continue to compose, while ordinary channels and async-generator sources are preserved as channel values.
 - `await`, `wait`, `await*`, `wait*`, and the promise combinators now accept values supported by `IntoPromiseChan`.
+- Promise combinators now consistently observe one result per input. Many-valued channels contribute one next take, `race` leaves losing channel values untouched, `all-settled` observes inputs concurrently while preserving input order, and `timeout` leaves timed-out sources available for later use.
+- `time` now treats asynchronous timing as observation-only instrumentation, so its timing callback still runs when borrowed work finishes after the caller completes or is cancelled.
 - Updated the default dependencies to Clojure 1.12.5 and core.async 1.9.865 while retaining compatibility with core.async 1.7.701.
 
 ## [0.1.0] - 2025-04-24

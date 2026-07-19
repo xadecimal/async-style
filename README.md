@@ -379,7 +379,7 @@ Cancellation follows ownership, not observation:
 - Starting work with `async`, `blocking`, or `compute` inside a running execution creates a direct owned child, unless the start happens inside `detach`.
 - Cancelling a parent cancels its direct children; each child then cancels its own direct children, so cancellation propagates transitively through the tree.
 - When a parent completes normally or fails, unfinished owned direct children are cancelled.
-- Awaiting, racing, timing out, or aggregating already-started work only observes it. Combinators such as `race`, `any`, `all`, `all-settled`, and `timeout` do not take ownership of borrowed input promises/channels.
+- Awaiting, racing, timing out, or aggregating already-started work only observes it. Combinators such as `race`, `any`, `all`, `all-settled`, and `timeout` do not take ownership of borrowed input promises/channels or call `areturn`, `close!`, or `cancel!` on them.
 - `race` and `any` do not cancel losers because they lost. Locally started losers are only cancelled if their owning parent scope ends while they are still unfinished.
 - Use `detach` when intentionally starting background work that should outlive the current parent scope.
 
@@ -531,7 +531,7 @@ Returning a combinator does not make the combinator own borrowed inputs. It only
 |-------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `sleep`     | Asynchronously pause for _ms_ milliseconds; returns a promise‑chan that fulfills with `nil` after the delay.                                         |
 | `defer`     | Wait _ms_ milliseconds, then asynchronously deliver a given value or call a provided fn; returns a promise‑chan.                                     |
-| `timeout`   | Observe a channel with a _ms_ deadline; returns its result or a `TimeoutException`/custom fallback without cancelling the input.                     |
+| `timeout`   | Observe one result with a _ms_ deadline; returns that result or a `TimeoutException`/custom fallback without managing the input source lifetime. |
 
 ### Racing & Gathering
 
@@ -544,6 +544,8 @@ Returning a combinator does not make the combinator own borrowed inputs. It only
 
 Notes:
 
+- These are Promise-style single-result combinators. A promise-like input contributes its settled value, while a many-valued channel contributes one next take.
+- Inputs remain borrowed. The combinators do not call `areturn`, `close!`, or `cancel!` on them; in particular, `timeout` applies to one observed result rather than to a source lifetime.
 - Passing a plain value treats it as already available. The current implementation may return the first available plain value, but callers should not rely on any ordering among already available values.
 - `all` and `any` short-circuit their returned promise-chan, but that is observation only. They do not cancel borrowed unfinished inputs.
 - If every input to `any` errors, it settles with an `ex-info` whose data includes `{:type :all-errored, :errors [...]}`.
@@ -569,7 +571,9 @@ Notes:
 | `ado` | Asynchronous `do`: execute expressions one after another, awaiting each; returns a promise‑chan of the last expression. |
 | `alet`| Asynchronous `let`: like `let` but each binding is awaited in order before evaluating the body.                         |
 | `clet`| Concurrent `let`: evaluates all bindings in parallel, auto‑awaiting any dependencies between them.                      |
-| `time`| Measure wall‑clock time of a sync or async expression; prints the elapsed ms and returns the expression’s value.        |
+| `time`| Observation-only timing for a sync expression or one async result; reports elapsed ms and returns the original value. |
+
+For channel-like values, `time` attaches a detached timing observer. Completing or cancelling the caller's scope does not suppress the callback, and timing never closes, cancels, or lifecycle-returns the observed value.
 
 ### Asynchronous `let` (`alet`) and Concurrent `let` (`clet`)
 

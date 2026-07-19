@@ -1493,7 +1493,30 @@ borrowed work."
                       (catch InterruptedException _
                         (q! :borrowed-timeout-cancelled)))]
            (is (= :it-timed-out (wait (timeout work 50 :it-timed-out))))
-           (is (= :borrowed-timeout-done (dq!))))))
+           (is (= :borrowed-timeout-done (dq!)))))
+
+  (testa "Timing out observes only one result and leaves a raw many-valued
+channel usable."
+         (let [source (ca/chan 1)]
+           (is (= :timed-out (wait (timeout source 10 :timed-out))))
+           (is (true? (ca/>!! source :still-usable)))
+           (is (= :still-usable (ca/<!! source)))))
+
+  (testa "Timing out a cold lifecycle-aware source does not return or cancel
+its producer."
+         (let [finalized (ca/promise-chan)
+               source (async-generator
+                        (await (sleep 50))
+                        (yield :late)
+                        (finally
+                          (ca/put! finalized :finalized)))]
+           (is (= :timed-out (wait (timeout source 10 :timed-out))))
+           (is (= :not-finalized
+                  (let [[v selected] (ca/alts!! [finalized (ca/timeout 20)])]
+                    (if (= selected finalized) v :not-finalized))))
+           (is (= :late (wait (anext source))))
+           (is (nil? (wait (areturn source))))
+           (is (= :finalized (ca/<!! finalized))))))
 
 
 (deftest race-tests
@@ -1530,6 +1553,43 @@ borrowed work."
   (testa "When passing already available values, the current implementation
 returns the first value, but callers should not rely on value ordering."
          (is (= 1 (wait (race [1 2 3 4 5 6 7 8 9 (async 10)])))))
+
+  (testa "Race consumes exactly one result across ready many-valued channels
+and leaves the losing channel's next value untouched."
+         (let [left (ca/chan 2)
+               right (ca/chan 2)]
+           (ca/>!! left :left-1)
+           (ca/>!! left :left-2)
+           (ca/>!! right :right-1)
+           (ca/>!! right :right-2)
+           (case (wait (race [left right]))
+             :left-1
+             (do
+               (is (= :left-2 (ca/poll! left)))
+               (is (= :right-1 (ca/poll! right)))
+               (is (= :right-2 (ca/poll! right))))
+
+             :right-1
+             (do
+               (is (= :right-2 (ca/poll! right)))
+               (is (= :left-1 (ca/poll! left)))
+               (is (= :left-2 (ca/poll! left)))))))
+
+  (testa "Race does not lifecycle-return a source after taking its winning
+result."
+         (let [finalized (ca/promise-chan)
+               source (async-generator
+                        (yield :winner)
+                        (yield :next)
+                        (finally
+                          (ca/put! finalized :finalized)))]
+           (is (= :winner (wait (race [source (sleep 100)]))))
+           (is (= :not-finalized
+                  (let [[v selected] (ca/alts!! [finalized (ca/timeout 20)])]
+                    (if (= selected finalized) v :not-finalized))))
+           (is (= :next (wait (anext source))))
+           (is (nil? (wait (areturn source))))
+           (is (= :finalized (ca/<!! finalized)))))
 
   (testa "Race does not cancel losing chans once one of them fulfills, they
    all keep running to completion."
@@ -1633,6 +1693,14 @@ the returned error data."
 returns the first ok value, but callers should not rely on value ordering."
          (is (= 1 (wait (any [1 2 3 4 5 6 7 8 9 (async 10)])))))
 
+  (testa "Any observes at most one next take from each many-valued input."
+         (let [error (ex-info "first result errors" {})
+               source (ca/chan 2)]
+           (ca/>!! source error)
+           (ca/>!! source :must-remain)
+           (is (= :other (wait (any [source (defer 20 :other)]))))
+           (is (= :must-remain (ca/poll! source)))))
+
   (testa "Any won't cancel the loser chans once one of them fulfills in ok?."
          (-> (any [(blocking
                      (Thread/sleep 100)
@@ -1730,7 +1798,18 @@ returns the first ok value, but callers should not rely on value ordering."
            (doall
             (for [i (range 3000)]
               (-> (all-settled [1 (async 2) 3 (async 4) (async 5) 6 (async 7) 8 9 (async 10)])
-                  (wait))))))))
+                  (wait)))))))
+
+  (testa "all-settled observes many-valued inputs concurrently and preserves
+input order."
+         (let [left (ca/chan)
+               right (ca/chan)
+               right-taken (ca/promise-chan)
+               ret (all-settled [left right])]
+           (ca/put! right :right #(ca/put! right-taken %))
+           (is (true? (first (ca/alts!! [right-taken (ca/timeout 100)]))))
+           (ca/put! left :left)
+           (is (= [:left :right] (wait ret))))))
 
 
 (deftest all-tests
@@ -1782,7 +1861,26 @@ to nil."
   (testa "If given nil, returns a promise-chan settled to nil."
          (async
            (q! (await (all []))))
-         (is (nil? (dq!)))))
+         (is (nil? (dq!))))
+
+  (testa "All observes many-valued inputs concurrently and preserves input
+order."
+         (let [left (ca/chan)
+               right (ca/chan)
+               right-taken (ca/promise-chan)
+               ret (all [left right])]
+           (ca/put! right :right #(ca/put! right-taken %))
+           (is (true? (first (ca/alts!! [right-taken (ca/timeout 100)]))))
+           (ca/put! left :left)
+           (is (= [:left :right] (wait ret)))))
+
+  (testa "All does not close, cancel, or lifecycle-return other inputs after
+an error."
+         (let [source (ca/chan 1)
+               error (ex-info "failed" {})]
+           (is (= error (wait* (all [(async (throw error)) source]))))
+           (is (true? (ca/>!! source :still-usable)))
+           (is (= :still-usable (ca/<!! source))))))
 
 
 (deftest async-generator-tests
@@ -2436,7 +2534,35 @@ wrap it with time. By default it prints to stdout."
          (is (< 0 (dq!) 1)))
   (testa "Unlike clojure.core/time, this one returns the value of what it
 times and not nil."
-         (is (= 3 (time (+ 1 2))))))
+         (is (= 3 (time (+ 1 2)))))
+  (testa "Timing a channel-like value returns that original value."
+         (let [work (ca/promise-chan)]
+           (is (identical? work (time work (fn [_]))))
+           (ca/close! work)))
+  (testa "Parent completion does not suppress timing output for borrowed work
+that completes later."
+         (let [work (ca/promise-chan)
+               printed (ca/promise-chan)
+               parent (async
+                        (time work #(ca/put! printed %))
+                        :parent-done)]
+           (is (= :parent-done (wait parent)))
+           (ca/put! work :work-done)
+           (is (number? (first (ca/alts!! [printed (ca/timeout 100)]))))))
+  (testa "Parent cancellation does not suppress timing output for borrowed
+work that completes later."
+         (let [work (ca/promise-chan)
+               registered (ca/promise-chan)
+               printed (ca/promise-chan)
+               parent (async
+                        (time work #(ca/put! printed %))
+                        (ca/put! registered true)
+                        (await (sleep 1000)))]
+           (is (true? (ca/<!! registered)))
+           (cancel! parent :parent-cancelled)
+           (is (= :parent-cancelled (wait* parent)))
+           (ca/put! work :work-done)
+           (is (number? (first (ca/alts!! [printed (ca/timeout 100)])))))))
 
 
 (defn make-future

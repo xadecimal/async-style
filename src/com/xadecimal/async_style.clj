@@ -334,9 +334,13 @@ Core terms:
   ([ms value-or-fn] (com.xadecimal.async-style.impl/defer ms value-or-fn)))
 
 (defn timeout
-  "If chan fulfills before ms time has passed, return a promise-chan settled
-   with the result, else returns a promise-chan settled with a TimeoutException
-   or the result of timed-out-value-or-fn.
+  "Observes one result from chan before ms time has passed and returns a
+   promise-chan settled with that result. If the deadline wins, returns a
+   promise-chan settled with a TimeoutException or the result of
+   timed-out-value-or-fn.
+
+   Timing out only stops timeout's own observation. It does not close, cancel,
+   or lifecycle-return chan, so a many-valued channel remains usable.
 
    timed-out-value-or-fn will run on the async-pool, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
@@ -356,12 +360,16 @@ Core terms:
    (com.xadecimal.async-style.impl/timeout chan ms timed-out-value-or-fn)))
 
 (defn race
-  "Returns a promise-chan that settles as soon as one of the chan in chans
-   fulfill, with the value settled by that chan.
+  "Returns a promise-chan that settles with the first observed result from
+   chans. A many-valued channel contributes one next take, and a single shared
+   selection ensures losing many-valued channels are not consumed.
 
    Unlike any, this will also return the first error? to be returned by one of
    the chans. So if the first chan to fulfill does so with an error?, race will
    return a promise-chan settled with that error.
+
+   Inputs are observed only; race does not close, cancel, or lifecycle-return
+   them.
 
   Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -379,15 +387,18 @@ Core terms:
    If all chans fulfill in error?, returns an error containing the list of all
    the errors.
 
+   Each many-valued channel contributes at most one next take. Inputs are
+   observed only; any does not close, cancel, or lifecycle-return them.
+
   Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/any ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/any chans)))
 
 (defn all-settled
-  "Takes a seqable of chans as an input, and returns a promise-chan that settles
-   after all of the given chans have fulfilled in ok? or error?, with a vector of
-   the taken ok? results and error? results of the input chans.
+  "Concurrently observes one result from each input in chans and returns a
+   promise-chan settled with a vector of the ok? and error? results in input
+   order. Many-valued channels contribute one next take.
 
    It is typically used when you have multiple asynchronous tasks that are not
    dependent on one another to complete successfully, or you'd always like to
@@ -397,7 +408,10 @@ Core terms:
    the tasks are dependent on each other / if you'd like to immediately stop upon
    any of them returning an error?.
 
-   Note:
+   Inputs are observed only; all-settled does not close, cancel, or
+   lifecycle-return them.
+
+  Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {:inline (fn ([chans] ` (com.xadecimal.async-style.impl/all-settled ~chans)))}
   ([chans] (com.xadecimal.async-style.impl/all-settled chans)))
@@ -410,6 +424,10 @@ Core terms:
    chans (only values or empty). It settles in error? immediately upon any of the
    input chans returning an error? or non-chans throwing an error?, and will
    contain the error? of the first taken chan to return one.
+
+   Inputs are observed concurrently and many-valued channels contribute one
+   next take. All does not close, cancel, or lifecycle-return inputs when one
+   errors.
 
   Note:
     * chan can be a channel or something supported by IntoPromiseChan."
@@ -586,9 +604,12 @@ Core terms:
   ([bindings & body] ` (com.xadecimal.async-style.impl/clet ~bindings ~@body)))
 
 (defmacro time
-  "Evaluates expr and prints the time it took. Returns the value of expr. If
-   expr evaluates to a channel, it waits for channel to fulfill before printing
-   the time it took.
+  "Evaluates expr and reports the time it took. Returns the original value of
+   expr. If expr evaluates to a channel, observes one result before reporting.
+
+   The timing callback is detached observation-only instrumentation. It does
+   not own or manage the observed value and is not suppressed merely because
+   the caller's cancellation scope completes.
 
    Note:
     * expr can return a channel or something supported by IntoPromiseChan."

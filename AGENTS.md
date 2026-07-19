@@ -71,7 +71,7 @@ Cover both successful values and `Throwable` results for async APIs. For cancell
 
 ## Commit & Pull Request Guidelines
 
-Recent commits use short, descriptive summaries, for example `Added structured cancellation...` or `Switched to a callback based implementation...`. Keep commits focused and explain behavior changes clearly.
+Recent commits use past-tense, concrete summaries, for example `Added structured cancellation...` or `Switched to a callback based implementation...`. Name the affected APIs or behavior and state the user-visible outcome; avoid generic summaries such as `Tightened ... semantics` that identify an area without saying what changed. For multi-part behavioral changes, summarize the main outcomes directly, for example `Prevented race from consuming losing channel values, made all-settled concurrent, and made timeout/time observation-only.` Keep commits focused.
 
 Pull requests should include a concise description, the commands run, and notes about compatibility with `core.async` 1.7 and 1.8+ when relevant. Mention generated-file updates explicitly if `bb gen` changed `src/com/xadecimal/async_style.clj`.
 
