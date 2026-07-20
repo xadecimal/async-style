@@ -115,18 +115,22 @@ it using check-cancelled! inside your async blocks."
                                                       (.getCause e)))))))
 
   (testa "Throws InterruptedException if cancelled."
-         (let [promise-chan (async (Thread/sleep 60)
-                                   (check-cancelled!)
-                                   (catch InterruptedException e
-                                     (q! e)))]
+         (let [promise-chan (async
+                              (try
+                                (Thread/sleep 60)
+                                (check-cancelled!)
+                                (catch InterruptedException e
+                                  (q! e))))]
            (Thread/sleep 30)
            (cancel! promise-chan))
          (is (instance? InterruptedException (dq!))))
 
   (testa "Returns nil and doesn't throw otherwise."
-         (async (q! (check-cancelled!))
-                (catch CancellationException e
-                  (q! e)))
+         (async
+           (try
+             (q! (check-cancelled!))
+             (catch CancellationException e
+               (q! e))))
          (is (nil? (dq!)))))
 
 
@@ -208,7 +212,8 @@ cooperative, so the child checks cancelled? before doing more work."
                                             :async-child-cancelled
                                             :async-child-done)))]
                           (q! child)
-                          (await (sleep 500)
+                          (try
+                            (await (sleep 500))
                             (catch InterruptedException _
                               nil))
                           :parent-done))
@@ -237,11 +242,12 @@ cooperative, so the child checks cancelled? before doing more work."
          (let [started (ca/promise-chan)
                parent (async
                         (blocking
-                          (ca/>!! started true)
-                          (Thread/sleep 200)
-                          (q! :blocking-child-done)
-                          (catch InterruptedException _
-                            (q! :blocking-child-cancelled)))
+                          (try
+                            (ca/>!! started true)
+                            (Thread/sleep 200)
+                            (q! :blocking-child-done)
+                            (catch InterruptedException _
+                              (q! :blocking-child-cancelled))))
                         (await started)
                         :parent-done)]
            (is (= :parent-done (wait parent)))
@@ -251,11 +257,12 @@ cooperative, so the child checks cancelled? before doing more work."
          (let [started (ca/promise-chan)
                parent (async
                         (blocking
-                          (ca/>!! started true)
-                          (Thread/sleep 200)
-                          (q! :blocking-child-done)
-                          (catch InterruptedException _
-                            (q! :blocking-child-cancelled)))
+                          (try
+                            (ca/>!! started true)
+                            (Thread/sleep 200)
+                            (q! :blocking-child-done)
+                            (catch InterruptedException _
+                              (q! :blocking-child-cancelled))))
                         (await started)
                         (throw (ex-info "parent failed" {})))]
            (is (instance? ExceptionInfo (wait* parent)))
@@ -266,20 +273,23 @@ cooperative, so the child checks cancelled? before doing more work."
                compute-started (ca/promise-chan)
                parent (async
                         (blocking
-                          (ca/>!! blocking-started true)
-                          (Thread/sleep 200)
-                          (q! :blocking-child-done)
-                          (catch InterruptedException _
-                            (q! :blocking-child-cancelled)))
+                          (try
+                            (ca/>!! blocking-started true)
+                            (Thread/sleep 200)
+                            (q! :blocking-child-done)
+                            (catch InterruptedException _
+                              (q! :blocking-child-cancelled))))
                         (compute
-                          (ca/>!! compute-started true)
-                          (Thread/sleep 200)
-                          (q! :compute-child-done)
-                          (catch InterruptedException _
-                            (q! :compute-child-cancelled)))
+                          (try
+                            (ca/>!! compute-started true)
+                            (Thread/sleep 200)
+                            (q! :compute-child-done)
+                            (catch InterruptedException _
+                              (q! :compute-child-cancelled))))
                         (await blocking-started)
                         (await compute-started)
-                        (await (sleep 500)
+                        (try
+                          (await (sleep 500))
                           (catch InterruptedException _
                             nil))
                         :parent-done)]
@@ -293,11 +303,12 @@ cooperative, so the child checks cancelled? before doing more work."
          (let [parent (async
                         (async
                           (blocking
-                            (q! :grandchild-started)
-                            (Thread/sleep 300)
-                            (q! :grandchild-done)
-                            (catch InterruptedException _
-                              (q! :grandchild-cancelled)))
+                            (try
+                              (q! :grandchild-started)
+                              (Thread/sleep 300)
+                              (q! :grandchild-done)
+                              (catch InterruptedException _
+                                (q! :grandchild-cancelled))))
                           (await (sleep 500)))
                         (await (sleep 500)))]
            (is (= :grandchild-started (dq!)))
@@ -307,17 +318,19 @@ cooperative, so the child checks cancelled? before doing more work."
 
   (testa "Borrowed promises passed to race are observed, not owned."
          (let [p1 (blocking
-                    (Thread/sleep 150)
-                    (q! :p1-done)
-                    :p1
-                    (catch InterruptedException _
-                      (q! :p1-cancelled)))
+                    (try
+                      (Thread/sleep 150)
+                      (q! :p1-done)
+                      :p1
+                      (catch InterruptedException _
+                        (q! :p1-cancelled))))
                p2 (blocking
-                    (Thread/sleep 200)
-                    (q! :p2-done)
-                    :p2
-                    (catch InterruptedException _
-                      (q! :p2-cancelled)))
+                    (try
+                      (Thread/sleep 200)
+                      (q! :p2-done)
+                      :p2
+                      (catch InterruptedException _
+                        (q! :p2-cancelled))))
                observer (async (race [p1 p2]))]
            (Thread/sleep 30)
            (cancel! observer :observer-cancelled)
@@ -328,11 +341,12 @@ cooperative, so the child checks cancelled? before doing more work."
 up when their parent scope completes."
          (let [parent (async
                         (race [(blocking
-                                 (Thread/sleep 200)
-                                 (q! :slow-done)
-                                 :slow
-                                 (catch InterruptedException _
-                                   (q! :slow-cancelled)))
+                                 (try
+                                   (Thread/sleep 200)
+                                   (q! :slow-done)
+                                   :slow
+                                   (catch InterruptedException _
+                                     (q! :slow-cancelled))))
                                (blocking
                                  (Thread/sleep 30)
                                  :fast)]))]
@@ -345,11 +359,12 @@ first error."
                     (Thread/sleep 30)
                     (throw (ex-info "borrowed failure" {})))
                p2 (blocking
-                    (Thread/sleep 120)
-                    (q! :borrowed-all-done)
-                    :ok
-                    (catch InterruptedException _
-                      (q! :borrowed-all-cancelled)))
+                    (try
+                      (Thread/sleep 120)
+                      (q! :borrowed-all-done)
+                      :ok
+                      (catch InterruptedException _
+                        (q! :borrowed-all-cancelled))))
                ret (wait* (all [p1 p2]))]
            (is (error? ret))
            (is (= :borrowed-all-done (dq!)))))
@@ -360,11 +375,12 @@ inputs."
                     (Thread/sleep 30)
                     (throw (ex-info "borrowed failure" {})))
                p2 (blocking
-                    (Thread/sleep 120)
-                    (q! :borrowed-all-settled-done)
-                    :ok
-                    (catch InterruptedException _
-                      (q! :borrowed-all-settled-cancelled)))
+                    (try
+                      (Thread/sleep 120)
+                      (q! :borrowed-all-settled-done)
+                      :ok
+                      (catch InterruptedException _
+                        (q! :borrowed-all-settled-cancelled))))
                ret (wait* (all-settled [p1 p2]))]
            (is (= 2 (count ret)))
            (is (= :borrowed-all-settled-done (dq!)))))
@@ -380,16 +396,18 @@ completion and cancellation."
                                  :detached-async-done))))
                         (detach
                          (blocking
-                           (Thread/sleep 120)
-                           (q! :detached-blocking-done)
-                           (catch InterruptedException _
-                             (q! :detached-blocking-cancelled))))
+                           (try
+                             (Thread/sleep 120)
+                             (q! :detached-blocking-done)
+                             (catch InterruptedException _
+                               (q! :detached-blocking-cancelled)))))
                         (detach
                          (compute
-                           (Thread/sleep 120)
-                           (q! :detached-compute-done)
-                           (catch InterruptedException _
-                             (q! :detached-compute-cancelled))))
+                           (try
+                             (Thread/sleep 120)
+                             (q! :detached-compute-done)
+                             (catch InterruptedException _
+                               (q! :detached-compute-cancelled)))))
                         :parent-done)]
            (is (= :parent-done (wait parent)))
            (is (= #{:detached-async-done
@@ -399,11 +417,13 @@ completion and cancellation."
          (let [parent (async
                         (detach
                          (blocking
-                           (Thread/sleep 120)
-                           (q! :detached-cancel-parent-done)
-                           (catch InterruptedException _
-                             (q! :detached-cancel-parent-cancelled))))
-                        (await (sleep 500)
+                           (try
+                             (Thread/sleep 120)
+                             (q! :detached-cancel-parent-done)
+                             (catch InterruptedException _
+                               (q! :detached-cancel-parent-cancelled)))))
+                        (try
+                          (await (sleep 500))
                           (catch InterruptedException _
                             nil)))]
            (Thread/sleep 30)
@@ -810,27 +830,32 @@ it only for async control flow."
            (is (= [0 1 2 3 4 5 6 7 8 9] (dq! 1100)))
            (is (= :timeout (dq! 1100)))))
 
-  (testa "Async supports implicit-try, meaning you can catch/finally on it as you would
-with try/catch/finally. It's similar to if you always wrapped the inside in a try."
-         (-> (async (/ 1 0)
-                    (catch ArithmeticException e
-                      0))
+  (testa "Async supports ordinary explicit try/catch."
+         (-> (async
+               (try
+                 (/ 1 0)
+                 (catch ArithmeticException _
+                   0)))
              (handle q!))
          (is (= 0 (dq!))))
 
-  (testa "Async example of implicit-try with a finally."
-         (-> (async (+ 1 1)
-                    (finally (q! :finally-called)))
+  (testa "Async supports ordinary explicit try/finally."
+         (-> (async
+               (try
+                 (+ 1 1)
+                 (finally (q! :finally-called))))
              (handle q!))
          (is (= :finally-called (dq!)))
          (is (= 2 (dq!))))
 
-  (testa "Or with catch and finally together."
-         (-> (async (/ 1 0)
-                    (catch ArithmeticException e
-                      (q! :catch-called)
-                      0)
-                    (finally (q! :finally-called)))
+  (testa "Explicit catch and finally work together."
+         (-> (async
+               (try
+                 (/ 1 0)
+                 (catch ArithmeticException _
+                   (q! :catch-called)
+                   0)
+                 (finally (q! :finally-called))))
              (handle q!))
          (is (= :catch-called (dq!)))
          (is (= :finally-called (dq!)))
@@ -925,27 +950,32 @@ threads as are needed so all your blocking blocks run concurrently."
              (handle q!))
          (is (= (range 200) (dq! 1100))))
 
-  (testa "Blocking supports implicit-try, meaning you can catch/finally on it as you would
-with try/catch/finally. It's similar to if you always wrapped the inside in a try."
-         (-> (blocking (/ 1 0)
-                       (catch ArithmeticException e
-                         0))
+  (testa "Blocking supports ordinary explicit try/catch."
+         (-> (blocking
+               (try
+                 (/ 1 0)
+                 (catch ArithmeticException _
+                   0)))
              (handle q!))
          (is (= 0 (dq!))))
 
-  (testa "Blocking example of implicit-try with a finally."
-         (-> (blocking (+ 1 1)
-                       (finally (q! :finally-called)))
+  (testa "Blocking supports ordinary explicit try/finally."
+         (-> (blocking
+               (try
+                 (+ 1 1)
+                 (finally (q! :finally-called))))
              (handle q!))
          (is (= :finally-called (dq!)))
          (is (= 2 (dq!))))
 
-  (testa "Or with catch and finally together."
-         (-> (blocking (/ 1 0)
-                       (catch ArithmeticException e
-                         (q! :catch-called)
-                         0)
-                       (finally (q! :finally-called)))
+  (testa "Explicit catch and finally work together."
+         (-> (blocking
+               (try
+                 (/ 1 0)
+                 (catch ArithmeticException _
+                   (q! :catch-called)
+                   0)
+                 (finally (q! :finally-called))))
              (handle q!))
          (is (= :catch-called (dq!)))
          (is (= :finally-called (dq!)))
@@ -1044,27 +1074,32 @@ get queued up and have to wait for one of those to finish. When doing long compu
              (handle q!))
          (is (= :timeout (dq! 1100))))
 
-  (testa "Compute supports implicit-try, meaning you can catch/finally on it as you would
-with try/catch/finally. It's similar to if you always wrapped the inside in a try."
-         (-> (compute (/ 1 0)
-                      (catch ArithmeticException e
-                        0))
+  (testa "Compute supports ordinary explicit try/catch."
+         (-> (compute
+               (try
+                 (/ 1 0)
+                 (catch ArithmeticException _
+                   0)))
              (handle q!))
          (is (= 0 (dq!))))
 
-  (testa "Compute example of implicit-try with a finally."
-         (-> (compute (+ 1 1)
-                      (finally (q! :finally-called)))
+  (testa "Compute supports ordinary explicit try/finally."
+         (-> (compute
+               (try
+                 (+ 1 1)
+                 (finally (q! :finally-called))))
              (handle q!))
          (is (= :finally-called (dq!)))
          (is (= 2 (dq!))))
 
-  (testa "Or with catch and finally together."
-         (-> (compute (/ 1 0)
-                      (catch ArithmeticException e
-                        (q! :catch-called)
-                        0)
-                      (finally (q! :finally-called)))
+  (testa "Explicit catch and finally work together."
+         (-> (compute
+               (try
+                 (/ 1 0)
+                 (catch ArithmeticException _
+                   (q! :catch-called)
+                   0)
+                 (finally (q! :finally-called))))
              (handle q!))
          (is (= :catch-called (dq!)))
          (is (= :finally-called (dq!)))
@@ -1117,7 +1152,6 @@ it supports handling thread interrupted."
            (is (= :cancelled (dq!)))
            (is (not= :was-not-cancelled (dq!))))))
 
-
 (deftest await-tests
   (testa "Await is used to wait on the result of an async operation."
          (async
@@ -1138,9 +1172,10 @@ it supports handling thread interrupted."
   (testa "You cannot await into a def, this is a current limitation, core.async suffers
 from the same, you can't <! into a def."
          (async
-           (def res (await (async (+ 3 5))))
-           (catch AssertionError e
-             (q! e)))
+           (try
+             (def res (await (async (+ 3 5))))
+             (catch AssertionError e
+               (q! e))))
          (is (= AssertionError (type (dq!)))))
 
   (testa "Work around this by using an intermediate let."
@@ -1165,10 +1200,11 @@ from the same, you can't <! into a def."
 issue with the underlying core.async lib.
 See: https://ask.clojure.org/index.php/350/go-ignores-async-code-in-letfn-body"
          (async
-           (letfn [(fetch-data [id] (async (str "data-" id)))]
-             (await (fetch-data 1)))
-           (catch AssertionError e
-             (q! e)))
+           (try
+             (letfn [(fetch-data [id] (async (str "data-" id)))]
+               (await (fetch-data 1)))
+             (catch AssertionError e
+               (q! e))))
          (is (= AssertionError (type (dq!)))))
 
   (testa "Work around this by using let instead."
@@ -1197,12 +1233,11 @@ simply returns it immediately."
            (q! (await (+ 1 2))))
          (is (= 3 (dq!))))
 
-  (testa "Await supports implicit-try syntax as well, meaning it can be used as a
-try/catch/finally, so you don't have to wrap it in a try to handle thrown
-exceptions from the async block."
+  (testa "Awaited errors can be handled with ordinary explicit try/catch/finally."
          (async
            (let [fetch-data (fn [] (async (throw (ex-info "Error fetching data" {}))))]
-             (await (fetch-data)
+             (try
+               (await (fetch-data))
                (catch Exception e
                  (q! e))
                (finally (q! :finally-called)))))
@@ -1487,11 +1522,12 @@ choosing on timeout instead."
   (testa "When it does time out, timeout observes the input and does not cancel
 borrowed work."
          (let [work (blocking
-                      (Thread/sleep 200)
-                      (q! :borrowed-timeout-done)
-                      :done
-                      (catch InterruptedException _
-                        (q! :borrowed-timeout-cancelled)))]
+                      (try
+                        (Thread/sleep 200)
+                        (q! :borrowed-timeout-done)
+                        :done
+                        (catch InterruptedException _
+                          (q! :borrowed-timeout-cancelled))))]
            (is (= :it-timed-out (wait (timeout work 50 :it-timed-out))))
            (is (= :borrowed-timeout-done (dq!)))))
 
@@ -1506,10 +1542,11 @@ channel usable."
 its producer."
          (let [finalized (ca/promise-chan)
                source (async-generator
-                        (await (sleep 50))
-                        (yield :late)
-                        (finally
-                          (ca/put! finalized :finalized)))]
+                        (try
+                          (await (sleep 50))
+                          (yield :late)
+                          (finally
+                            (ca/put! finalized :finalized))))]
            (is (= :timed-out (wait (timeout source 10 :timed-out))))
            (is (= :not-finalized
                   (let [[v selected] (ca/alts!! [finalized (ca/timeout 20)])]
@@ -1579,10 +1616,11 @@ and leaves the losing channel's next value untouched."
 result."
          (let [finalized (ca/promise-chan)
                source (async-generator
-                        (yield :winner)
-                        (yield :next)
-                        (finally
-                          (ca/put! finalized :finalized)))]
+                        (try
+                          (yield :winner)
+                          (yield :next)
+                          (finally
+                            (ca/put! finalized :finalized))))]
            (is (= :winner (wait (race [source (sleep 100)]))))
            (is (= :not-finalized
                   (let [[v selected] (ca/alts!! [finalized (ca/timeout 20)])]
@@ -1594,20 +1632,23 @@ result."
   (testa "Race does not cancel losing chans once one of them fulfills, they
    all keep running to completion."
          (-> (race [(blocking
-                      (Thread/sleep 100)
-                      (q! :done)
-                      (catch InterruptedException _
-                        (q! :cancelled)))
+                      (try
+                        (Thread/sleep 100)
+                        (q! :done)
+                        (catch InterruptedException _
+                          (q! :cancelled))))
                     (blocking
-                      (Thread/sleep 100)
-                      (q! :done)
-                      (catch InterruptedException _
-                        (q! :cancelled)))
+                      (try
+                        (Thread/sleep 100)
+                        (q! :done)
+                        (catch InterruptedException _
+                          (q! :cancelled))))
                     (blocking
-                      (Thread/sleep 100)
-                      (q! :done)
-                      (catch InterruptedException _
-                        (q! :cancelled)))
+                      (try
+                        (Thread/sleep 100)
+                        (q! :done)
+                        (catch InterruptedException _
+                          (q! :cancelled))))
                     (async :done)])
              (handle q!))
          (is (= :done (dq!)))
@@ -1618,20 +1659,23 @@ result."
   (testa "Even if the first one to fulfill did so with an error, others still
    continue running."
          (-> (race [(blocking
-                      (Thread/sleep 100)
-                      (q! :done)
-                      (catch InterruptedException _
-                        (q! :cancelled)))
+                      (try
+                        (Thread/sleep 100)
+                        (q! :done)
+                        (catch InterruptedException _
+                          (q! :cancelled))))
                     (blocking
-                      (Thread/sleep 100)
-                      (q! :done)
-                      (catch InterruptedException _
-                        (q! :cancelled)))
+                      (try
+                        (Thread/sleep 100)
+                        (q! :done)
+                        (catch InterruptedException _
+                          (q! :cancelled))))
                     (blocking
-                      (Thread/sleep 100)
-                      (q! :done)
-                      (catch InterruptedException _
-                        (q! :cancelled)))
+                      (try
+                        (Thread/sleep 100)
+                        (q! :done)
+                        (catch InterruptedException _
+                          (q! :cancelled))))
                     (async (throw (ex-info "error" {})))])
              (handle q!))
          (is (error? (dq!)))
@@ -1703,20 +1747,23 @@ returns the first ok value, but callers should not rely on value ordering."
 
   (testa "Any won't cancel the loser chans once one of them fulfills in ok?."
          (-> (any [(blocking
-                     (Thread/sleep 100)
-                     (q! :done)
-                     (catch InterruptedException _
-                       (q! :cancelled)))
+                     (try
+                       (Thread/sleep 100)
+                       (q! :done)
+                       (catch InterruptedException _
+                         (q! :cancelled))))
                    (blocking
-                     (Thread/sleep 100)
-                     (q! :done)
-                     (catch InterruptedException _
-                       (q! :cancelled)))
+                     (try
+                       (Thread/sleep 100)
+                       (q! :done)
+                       (catch InterruptedException _
+                         (q! :cancelled))))
                    (blocking
-                     (Thread/sleep 100)
-                     (q! :done)
-                     (catch InterruptedException _
-                       (q! :cancelled)))
+                     (try
+                       (Thread/sleep 100)
+                       (q! :done)
+                       (catch InterruptedException _
+                         (q! :cancelled))))
                    (defer 30 :done)
                    (async (q! :throwed) (throw (ex-info "" {})))])
              (handle q!))
@@ -1730,15 +1777,17 @@ returns the first ok value, but callers should not rely on value ordering."
    won't be cancelled. Even after any of the other fulfill, the remaining
    ones will keep running without being cancelled."
          (-> (any [(blocking
-                     (Thread/sleep 30)
-                     (q! :not-cancelled)
-                     (catch InterruptedException _
-                       (q! :cancelled)))
+                     (try
+                       (Thread/sleep 30)
+                       (q! :not-cancelled)
+                       (catch InterruptedException _
+                         (q! :cancelled))))
                    (blocking
-                     (Thread/sleep 60)
-                     (q! :not-cancelled)
-                     (catch InterruptedException _
-                       (q! :cancelled)))
+                     (try
+                       (Thread/sleep 60)
+                       (q! :not-cancelled)
+                       (catch InterruptedException _
+                         (q! :cancelled))))
                    (async (throw (ex-info "error" {})))])
              (handle q!))
          (is (= :not-cancelled (dq!)))
@@ -1928,10 +1977,11 @@ an error."
 
   (testa "adoseq exits on :while and waits for generator cleanup."
          (let [source (async-generator
-                        (yield 1)
-                        (yield 2)
-                        (finally
-                          (q! :generator-cleaned)))]
+                        (try
+                          (yield 1)
+                          (yield 2)
+                          (finally
+                            (q! :generator-cleaned))))]
            (is (nil? (wait (adoseq [x source
                                      :while (< x 2)]
                              (q! x)))))
@@ -1979,19 +2029,22 @@ an error."
   (testa "First consumption of a returned generator owns its producer."
          (let [ret (async
                      (async-generator
-                       (yield 1)
-                       (await (sleep 500)
-                              (catch InterruptedException _
-                                nil))
-                       (finally
-                         (q! :returned-generator-cleaned))))
+                       (try
+                         (yield 1)
+                         (try
+                           (await (sleep 500))
+                           (catch InterruptedException _
+                             nil))
+                         (finally
+                           (q! :returned-generator-cleaned)))))
                source (wait ret)
                consumer (async
                           (adoseq [x source]
                             (q! x)
-                            (await (sleep 500)
-                                   (catch InterruptedException _
-                                     nil))))]
+                            (try
+                              (await (sleep 500))
+                              (catch InterruptedException _
+                                nil))))]
            (is (= 1 (dq!)))
            (cancel! consumer :consumer-cancelled)
            (is (= :consumer-cancelled (wait* consumer)))
@@ -2000,10 +2053,11 @@ an error."
   (testa "Cancelling the creator after it returned does not cancel an unconsumed generator."
          (let [creator (async
                          (async-generator
-                           (q! :late-started)
-                           (yield :late-value)
-                           (finally
-                             (q! :late-cleaned))))
+                           (try
+                             (q! :late-started)
+                             (yield :late-value)
+                             (finally
+                               (q! :late-cleaned)))))
                source (wait creator)]
            (cancel! creator :too-late)
            (is (= :timeout (dq! 50)))
@@ -2082,9 +2136,10 @@ an error."
 (deftest async-manual-return-tests
   (testa "areturn runs generator finally and is idempotent."
          (let [source (async-generator
-                        (yield 1)
-                        (finally
-                          (q! :manual-cleaned)))]
+                        (try
+                          (yield 1)
+                          (finally
+                            (q! :manual-cleaned))))]
            (is (= 1 (wait (anext source))))
            (is (nil? (wait (areturn source))))
            (is (= :manual-cleaned (dq!)))
@@ -2102,11 +2157,12 @@ an error."
 
   (testa "Manual anext twice then areturn works."
          (let [source (async-generator
-                        (yield 1)
-                        (yield 2)
-                        (yield 3)
-                        (finally
-                          (q! :manual-two-cleaned)))]
+                        (try
+                          (yield 1)
+                          (yield 2)
+                          (yield 3)
+                          (finally
+                            (q! :manual-two-cleaned))))]
            (is (= 1 (wait (anext source))))
            (is (= 2 (wait (anext source))))
            (is (nil? (wait (areturn source))))
@@ -2116,32 +2172,36 @@ an error."
 (deftest async-generator-cancel-lifecycle-tests
   (testa "cancel! on a started async-generator requests lifecycle cleanup."
          (let [source (async-generator
-                        (yield 1)
-                        (await (sleep 500)
-                               (catch InterruptedException _
-                                 nil))
-                        (finally
-                          (q! :cancel-generator-cleaned)))]
+                        (try
+                          (yield 1)
+                          (try
+                            (await (sleep 500))
+                            (catch InterruptedException _
+                              nil))
+                          (finally
+                            (q! :cancel-generator-cleaned))))]
            (is (= 1 (wait (anext source))))
            (is (true? (cancel! source)))
            (is (= :cancel-generator-cleaned (dq!)))))
 
   (testa "cancel! on an unstarted async-generator is safe and idempotent."
          (let [source (async-generator
-                        (q! :cancel-unstarted-started)
-                        (yield 1)
-                        (finally
-                          (q! :cancel-unstarted-cleaned)))]
+                        (try
+                          (q! :cancel-unstarted-started)
+                          (yield 1)
+                          (finally
+                            (q! :cancel-unstarted-cleaned))))]
            (is (true? (cancel! source)))
            (is (true? (cancel! source)))
            (is (= :timeout (dq! 50)))))
 
   (testa "cancel! unblocks a generator paused after an unbuffered yield."
          (let [source (async-generator
-                        (yield :first)
-                        (q! :after-yield)
-                        (finally
-                          (q! :paused-generator-cleaned)))]
+                        (try
+                          (yield :first)
+                          (q! :after-yield)
+                          (finally
+                            (q! :paused-generator-cleaned))))]
            (is (= :first (wait (anext source))))
            (is (= :timeout (dq! 50)))
            (is (true? (cancel! source)))
@@ -2152,11 +2212,12 @@ an error."
          (let [cleanup-started (ca/promise-chan)
                release-cleanup (ca/promise-chan)
                source (async-generator
-                        (yield :first)
-                        (finally
-                          (ca/>! cleanup-started true)
-                          (ca/<! release-cleanup)
-                          (q! :areturn-waited-cleanup)))]
+                        (try
+                          (yield :first)
+                          (finally
+                            (ca/>! cleanup-started true)
+                            (ca/<! release-cleanup)
+                            (q! :areturn-waited-cleanup))))]
            (is (= :first (wait (anext source))))
            (let [ret (areturn source)]
              (is (true? (ca/<!! cleanup-started)))
@@ -2167,10 +2228,11 @@ an error."
 
   (testa "close! is only a raw channel close, not lifecycle cleanup."
          (let [source (async-generator
-                        (q! :close-started)
-                        (yield :value)
-                        (finally
-                          (q! :close-cleaned)))]
+                        (try
+                          (q! :close-started)
+                          (yield :value)
+                          (finally
+                            (q! :close-cleaned))))]
            (ca/close! source)
            (is (= :timeout (dq! 50)))
            (is (nil? (wait (areturn source)))))))
@@ -2197,10 +2259,11 @@ an error."
 
   (testa "areduce short-circuits with reduced and cleans up lifecycle-aware sources."
          (let [source (async-generator
-                        (yield 1)
-                        (yield 2)
-                        (finally
-                          (q! :reduced-cleaned)))]
+                        (try
+                          (yield 1)
+                          (yield 2)
+                          (finally
+                            (q! :reduced-cleaned))))]
            (is (= 1 (wait (areduce (fn [_ x] (reduced x)) nil source))))
            (is (= :reduced-cleaned (dq!)))))
 
@@ -2227,10 +2290,11 @@ an error."
 
   (testa "atransduce cleans up lifecycle-aware sources when a step throws."
          (let [source (async-generator
-                        (yield 1)
-                        (yield 2)
-                        (finally
-                          (q! :atransduce-error-cleaned)))
+                        (try
+                          (yield 1)
+                          (yield 2)
+                          (finally
+                            (q! :atransduce-error-cleaned))))
                ret (wait* (atransduce (map (fn [x]
                                               (if (= x 1)
                                                 (throw (ex-info "xf failed" {}))
@@ -2246,10 +2310,11 @@ an error."
 
   (testa "detach allows eager generator consumption to outlive parent completion."
          (let [source (async-generator
-                        (await (sleep 50))
-                        (yield :detached-generator-value)
-                        (finally
-                          (q! :detached-generator-cleaned)))
+                        (try
+                          (await (sleep 50))
+                          (yield :detached-generator-value)
+                          (finally
+                            (q! :detached-generator-cleaned))))
                parent (async
                         (detach
                           (async
@@ -2280,25 +2345,27 @@ an error."
 (defn- test-doubled-source
   [source]
   (async-generator
-    (loop []
-      (let [x (await* source)]
-        (when-not (nil? x)
-          (yield (* x 2))
-          (recur))))
-    (finally
-      (when-some [cleanup (impl/source-cleanup-chan source)]
-        (detach (await cleanup)))
-      (q! :transformer-cleaned))))
+    (try
+      (loop []
+        (let [x (await* source)]
+          (when-not (nil? x)
+            (yield (* x 2))
+            (recur))))
+      (finally
+        (when-some [cleanup (impl/source-cleanup-chan source)]
+          (detach (await cleanup)))
+        (q! :transformer-cleaned)))))
 
 
 (deftest async-generator-structured-tests
 
   (testa "Parent cancellation while consuming a generator runs generator cleanup."
          (let [source (async-generator
-                        (yield :started)
-                        (await (sleep 500))
-                        (finally
-                          (q! :parent-cancel-cleaned)))
+                        (try
+                          (yield :started)
+                          (await (sleep 500))
+                          (finally
+                            (q! :parent-cancel-cleaned))))
                parent (async
                         (adoseq [x source]
                           (q! x)
@@ -2311,10 +2378,11 @@ an error."
   (testa "Parent completion cancels an unfinished generator producer."
          (let [parent (async
                         (let [source (async-generator
-                                       (yield :parent-completion-started)
-                                       (await (sleep 500))
-                                       (finally
-                                         (q! :parent-completion-cleaned)))]
+                                       (try
+                                         (yield :parent-completion-started)
+                                         (await (sleep 500))
+                                         (finally
+                                           (q! :parent-completion-cleaned))))]
                           (q! (await source))
                           :parent-done))]
            (is (= :parent-done (wait parent)))
@@ -2324,10 +2392,11 @@ an error."
 
   (testa "Early downstream exit cascades cleanup through transformer generators."
          (let [source (async-generator
-                        (yield 1)
-                        (yield 2)
-                        (finally
-                          (q! :source-cleaned)))
+                        (try
+                          (yield 1)
+                          (yield 2)
+                          (finally
+                            (q! :source-cleaned))))
                doubled (test-doubled-source source)]
            (is (nil? (wait (adoseq [x doubled
                                      :while false]

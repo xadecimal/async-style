@@ -146,8 +146,7 @@ Core terms:
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
-   implicit-try, and returning a promise-chan settled with the result or any
-   exception thrown.
+   returning a promise-chan settled with the result or any exception thrown.
 
    body will run on the async-pool, so if you plan on doing something blocking
    or compute heavy, use blocking or compute instead."
@@ -156,8 +155,8 @@ Core terms:
 
 (defmacro blocking
   "Asynchronously execute body on the blocking-pool with support for
-   cancellation, implicit-try, and returning a promise-chan settled with the
-   result or any exception thrown.
+   cancellation, returning a promise-chan settled with the result or any
+   exception thrown.
 
    body will run on the blocking-pool, so use this when you will be blocking or
    doing blocking io only."
@@ -166,8 +165,8 @@ Core terms:
 
 (defmacro compute
   "Asynchronously execute body on the compute-pool with support for
-   cancellation, implicit-try, and returning a promise-chan settled with the
-   result or any exception thrown.
+   cancellation, returning a promise-chan settled with the result or any
+   exception thrown.
 
    body will run on the compute-pool, so use this when you will be doing heavy
    computation, and don't block, if you're going to block use blocking
@@ -180,42 +179,19 @@ Core terms:
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
    returning the value settled by the producer.
 
-   Supports implicit-try to handle thrown exceptions such as:
-
-   (async
-     (await (async (/ 1 0))
-            (catch ArithmeticException e
-              (println e))
-            (catch Exception e
-              (println \"Other unexpected excpetion\"))
-            (finally (println \"done\"))))
-
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {}
-  ([chan-or-value & body]
-   `
-   (com.xadecimal.async-style.impl/await ~chan-or-value ~@body)))
+  ([chan-or-value] ` (com.xadecimal.async-style.impl/await ~chan-or-value)))
 
 (defmacro wait
   "Blocking takes from chan-or-value so that any exception taken is re-thrown,
    returning the value settled by the producer.
 
-   Supports implicit-try to handle thrown exceptions such as:
-
-   (wait (async (/ 1 0))
-         (catch ArithmeticException e
-           (println e))
-         (catch Exception e
-           (println \"Other unexpected excpetion\"))
-         (finally (println \"done\")))
-
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
   {}
-  ([chan-or-value & body]
-   `
-   (com.xadecimal.async-style.impl/wait ~chan-or-value ~@body)))
+  ([chan-or-value] ` (com.xadecimal.async-style.impl/wait ~chan-or-value)))
 
 (defn catch
   "Parking takes the settled value from chan. If value is an error of
@@ -443,10 +419,7 @@ Core terms:
 
    Accepts an optional options map. Currently supported:
      * :buffer-size - fixed, lossless output buffer size. Defaults to 0 for an
-       unbuffered, pull-based handoff.
-
-   Supports implicit trailing catch/finally forms like async, blocking, and
-   compute."
+       unbuffered, pull-based handoff."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/async-generator ~@body)))
 

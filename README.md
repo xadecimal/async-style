@@ -72,9 +72,10 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
 
 ;; Handle an error
 (async
-  (println "Divide:" (await (async (/ 1 0))))
-  (catch ArithmeticException _
-    (println "Can't divide by zero!")))
+  (try
+    (println "Divide:" (await (async (/ 1 0))))
+    (catch ArithmeticException _
+      (println "Can't divide by zero!"))))
 
 ;; Cancel an operation
 (let [task (blocking (Thread/sleep 5000)
@@ -199,13 +200,14 @@ Nested async-style producers still compose because each producer waits one promi
 ```clojure
 (defn ticks []
   (async-generator
-    (yield "starting")
-    (await (sleep 100))
-    (yield "middle")
-    (await (sleep 100))
-    (yield "done")
-    (finally
-      (println "cleanup"))))
+    (try
+      (yield "starting")
+      (await (sleep 100))
+      (yield "middle")
+      (await (sleep 100))
+      (yield "done")
+      (finally
+        (println "cleanup")))))
 
 (async
   (adoseq [tick (ticks)
@@ -265,17 +267,14 @@ Reducing functions and transducer steps passed to `areduce`, `atransduce`, and `
 
 ### Errors
 
-#### Implicit `try` / `catch` / `finally`
+#### Explicit `try` / `catch` / `finally`
 
-All of `async`, `blocking`, `compute` and `await`:
-
-1. **Automatically wrap** your body in a single `try` if you include any trailing
-   `(catch …)` or `(finally …)` forms.
-2. **Pull in** any `(catch Type e …)` or `(finally …)` at the end of your block
-   into that `try`, so you don’t have to write it yourself.
+Use ordinary Clojure `try` forms inside `async`, `blocking`, `compute`, and
+`async-generator` when handling errors or running cleanup. `await` and `wait`
+each accept exactly one value; wrap the call in `try` when its errors need to be
+handled locally.
 
 ```clojure
-;; without implicit try, you’d need:
 (async
   (try
     (/ 1 0)
@@ -283,21 +282,10 @@ All of `async`, `blocking`, `compute` and `await`:
       (println "oops:" e))
     (finally
       (println "done"))))
-
-;; with implicit try, just append catch/finally:
-(async
-  (/ 1 0)
-  (catch ArithmeticException e
-    (println "oops:" e))
-  (finally
-    (println "done")))
 ```
 
-- Missing catch/finally? No wrapping is done (no overhead).
-- Only catch or only finally? Works the same.
-- Multiple catch? All are honored in order.
-
-This gives you JS‑style inline error handling right in your async blocks.
+Explicit `try` keeps normal lexical scope, so cleanup can access resources
+bound outside or around it.
 
 #### Error Handling Combinators
 
@@ -489,9 +477,10 @@ Returning a combinator does not make the combinator own borrowed inputs. It only
 
 ;; downstream:
 (async
-  (await work)
-  (catch CancellationException _
-    (println "Work was cancelled!")))
+  (try
+    (await work)
+    (catch CancellationException _
+      (println "Work was cancelled!"))))
 ```
 
 ---

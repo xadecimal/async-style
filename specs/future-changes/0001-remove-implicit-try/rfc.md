@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed future breaking change before v1.
+Implemented.
 
 ## Summary
 

@@ -61,30 +61,6 @@
   []
   (InterruptedException. "Operation was interrupted."))
 
-(defn- implicit-try
-  "Wraps body in an implicit (try body) and uses the last forms of body if they
-   are one or more catch, a finally or a combination of those as the catch(s) and
-   finally block of the try.
-
-   Example:
-    (implicit-try '((println 100) (/ 1 0) (catch ArithmeticException e (println e))))
-    => ((try (println 100) (/ 1 0) (catch ArithmeticException e (println e))))"
-  [body]
-  (let [[try' rem] (split-with #(or (not (seqable? %)) (not (#{'catch 'finally} (first %)))) body)
-        [catches rem] (split-with #(and (seqable? %) (= 'catch (first %))) rem)
-        finally (or (when (and (seqable? (first rem)) (= 'finally (ffirst rem))) (first rem))
-                    (when (and (seqable? (second rem)) (= 'finally (-> rem second first))) (second rem)))]
-    (when (not= `(~@try' ~@(when catches catches) ~@(when finally [finally])) body)
-      (throw (ex-info "Bad syntax, form must either not have a catch and finally block, or it must end with one or more catch blocks followed by a finally block in that order, or it must end with one or more catch blocks, or it must end with a single finally block." {})))
-    `(~@(if (not (or (seq catches) finally))
-          body
-          [`(try
-              ~@try'
-              ~@(when catches
-                  catches)
-              ~@(when finally
-                  [finally]))]))))
-
 (defn settle-immediately!
   "Puts v into chan if it is possible to do so immediately (uses offer!) and
    closes chan. If v is nil it will just close chan. Returns true if offer! of v
@@ -439,8 +415,8 @@ they should short-circuit as soon as they can.")
 
 (defn- async'
   "Wraps body in a way that it executes in an async or blocking block with
-   support for cancellation, implicit-try, and returning a promise-chan settled
-   with the result or any exception thrown."
+   support for cancellation and returns a promise-chan settled with the result
+   or any exception thrown."
   [body execution-type]
   (case execution-type
     :async `(let [ret# (a/promise-chan)
@@ -450,7 +426,7 @@ they should short-circuit as soon as they can.")
                 (binding [*cancellation-chan* ret#]
                   (when-not (cancelled?)
                     (settle! ret#
-                             (try ~@(implicit-try body)
+                             (try (do ~@body)
                                   (catch Throwable t#
                                     t#))))))
               ret#)
@@ -472,7 +448,7 @@ they should short-circuit as soon as they can.")
                 (try
                   (vreset! interrupter-thread# (Thread/currentThread))
                   (when-not (cancelled?)
-                    (try ~@(implicit-try body)
+                    (try (do ~@body)
                          (catch Throwable t#
                            t#)))
                   (finally
@@ -484,8 +460,7 @@ they should short-circuit as soon as they can.")
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
-   implicit-try, and returning a promise-chan settled with the result or any
-   exception thrown.
+   returning a promise-chan settled with the result or any exception thrown.
 
    body will run on the async-pool, so if you plan on doing something blocking
    or compute heavy, use blocking or compute instead."
@@ -494,8 +469,8 @@ they should short-circuit as soon as they can.")
 
 (defmacro blocking
   "Asynchronously execute body on the blocking-pool with support for
-   cancellation, implicit-try, and returning a promise-chan settled with the
-   result or any exception thrown.
+   cancellation, returning a promise-chan settled with the result or any
+   exception thrown.
 
    body will run on the blocking-pool, so use this when you will be blocking or
    doing blocking io only."
@@ -504,8 +479,8 @@ they should short-circuit as soon as they can.")
 
 (defmacro compute
   "Asynchronously execute body on the compute-pool with support for
-   cancellation, implicit-try, and returning a promise-chan settled with the
-   result or any exception thrown.
+   cancellation, returning a promise-chan settled with the result or any
+   exception thrown.
 
    body will run on the compute-pool, so use this when you will be doing heavy
    computation, and don't block, if you're going to block use blocking
@@ -547,10 +522,7 @@ they should short-circuit as soon as they can.")
 
    Accepts an optional options map. Currently supported:
      * :buffer-size - fixed, lossless output buffer size. Defaults to 0 for an
-       unbuffered, pull-based handoff.
-
-   Supports implicit trailing catch/finally forms like async, blocking, and
-   compute."
+       unbuffered, pull-based handoff."
   [& body]
   (let [[opts body] (if (map? (first body))
                       [(first body) (next body)]
@@ -562,7 +534,7 @@ they should short-circuit as soon as they can.")
           (try
             (await
              (binding [*yield-context* {:chan out# :state state#}]
-               ~@(implicit-try body)))
+               ~@body))
             (catch Throwable t#
               (when-not (or (:returned? @state#)
                             (instance? InterruptedException t#)
@@ -628,9 +600,11 @@ they should short-circuit as soon as they can.")
   IBlockingDeref
   (->promise-chan [this]
     (let [pc (detach
-              (blocking @this
-                        (catch ExecutionException e
-                          (throw (.getCause e)))))
+              (blocking
+                (try
+                  @this
+                  (catch ExecutionException e
+                    (throw (.getCause e))))))
           callbacks (locking cancellation-callbacks
                       (.get cancellation-callbacks pc))]
       (when callbacks
@@ -640,9 +614,11 @@ they should short-circuit as soon as they can.")
   CompletableFuture
   (->promise-chan [this]
     (let [pc (detach
-              (blocking @this
-                        (catch ExecutionException e
-                          (throw (.getCause e)))))
+              (blocking
+                (try
+                  @this
+                  (catch ExecutionException e
+                    (throw (.getCause e))))))
           callbacks (locking cancellation-callbacks
                       (.get cancellation-callbacks pc))]
       (when callbacks
@@ -742,38 +718,19 @@ they should short-circuit as soon as they can.")
   "Parking takes from chan-or-value so that any exception taken is re-thrown,
    returning the value settled by the producer.
 
-   Supports implicit-try to handle thrown exceptions such as:
-
-   (async
-     (await (async (/ 1 0))
-            (catch ArithmeticException e
-              (println e))
-            (catch Exception e
-              (println \"Other unexpected excpetion\"))
-            (finally (println \"done\"))))
-
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
-  [chan-or-value & body]
-  (first (implicit-try (cons (<<?' chan-or-value) body))))
+  [chan-or-value]
+  (<<?' chan-or-value))
 
 (defmacro wait
   "Blocking takes from chan-or-value so that any exception taken is re-thrown,
    returning the value settled by the producer.
 
-   Supports implicit-try to handle thrown exceptions such as:
-
-   (wait (async (/ 1 0))
-         (catch ArithmeticException e
-           (println e))
-         (catch Exception e
-           (println \"Other unexpected excpetion\"))
-         (finally (println \"done\")))
-
    Note:
     * chan can be a channel or something supported by IntoPromiseChan."
-  [chan-or-value & body]
-  (first (implicit-try (cons (<<??' chan-or-value) body))))
+  [chan-or-value]
+  (<<??' chan-or-value))
 
 (defn catch
   "Parking takes the settled value from chan. If value is an error of
