@@ -2238,6 +2238,46 @@ an error."
            (is (nil? (wait (areturn source)))))))
 
 
+(deftest afor-binding-tests
+  (testa "afor matches Clojure for for nested destructuring, qualifiers, and order."
+         (let [entries [[:a [[1 10] [2 20] [3 30]]]
+                        [:b [[1 40] [2 50] [3 60]]]]
+               expected (vec (for [[group rows] entries
+                                   [index value] rows
+                                   :let [scaled (* value 10)]
+                                   :while (< index 3)
+                                   :when (odd? index)]
+                               [group index scaled]))]
+           (is (= expected
+                  (wait (afor [[group rows] entries
+                               [index value] rows
+                               :let [scaled (* value 10)]
+                               :while (< index 3)
+                               :when (odd? index)]
+                          [group index scaled])))))))
+
+
+(deftest adoseq-binding-tests
+  (testa "adoseq matches Clojure doseq for nested binding and side-effect order."
+         (let [entries [[:a [[1 10] [2 20] [3 30]]]
+                        [:b [[1 40] [2 50] [3 60]]]]
+               expected (atom [])
+               actual (atom [])]
+           (doseq [[group rows] entries
+                   [index value] rows
+                   :let [scaled (* value 10)]
+                   :while (< index 3)
+                   :when (odd? index)]
+             (swap! expected conj [group index scaled]))
+           (is (nil? (wait (adoseq [[group rows] entries
+                                    [index value] rows
+                                    :let [scaled (* value 10)]
+                                    :while (< index 3)
+                                    :when (odd? index)]
+                            (swap! actual conj [group index scaled])))))
+           (is (= @expected @actual)))))
+
+
 (deftest async-iteration-consumer-tests
 
   (testa "afor consumes collection-like sources and awaits async-style elements."

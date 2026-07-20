@@ -107,7 +107,7 @@ Task breakdown for implementing
 - [x] Allow explicit `await` in bodies and qualifier expressions.
 - [x] Treat body-returned `reduced` as an ordinary value; use `:while` for loop short-circuiting.
 - [x] On `:while`, body error, or cancellation, call lifecycle cleanup when supported.
-- [ ] Add more tests matching Clojure `doseq`/`for` behavior for nested binding forms and ordering.
+- [x] Add more tests matching Clojure `doseq`/`for` behavior for nested binding forms and ordering.
 
 ## 8. Structured Concurrency Semantics
 

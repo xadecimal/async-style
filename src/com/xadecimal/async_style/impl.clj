@@ -1258,37 +1258,59 @@ they should short-circuit as soon as they can.")
    body
    (reverse mods)))
 
+(defn- consume-async-for-source
+  "Consumes one async iteration binding source and awaits f for each item."
+  [source-fn f]
+  (async
+    (let [source (->promise-chan (source-fn))
+          channel? (chan? source)
+          items (when-not channel?
+                  (atom (seq (source-items source))))
+          normal? (atom false)]
+      (try
+        (loop []
+          (let [[more? item]
+                (if channel?
+                  (let [item (await* source)]
+                    [(some? item) item])
+                  (if-let [remaining (seq @items)]
+                    (do
+                      (swap! items next)
+                      [true (first remaining)])
+                    [false nil]))]
+            (if more?
+              (do
+                (await (f (await item)))
+                (recur))
+              (reset! normal? true))))
+        (catch Throwable t
+          (when-not (async-iteration-stopped? t)
+            (throw t)))
+        (finally
+          (when (and channel? (not @normal?))
+            (detach (await (areturn source))))))
+      nil)))
+
 (defn- emit-async-for
   "Emits nested async iteration for parsed binding groups, including lifecycle
    cleanup when channel consumption ends early."
   [groups body]
   (if-let [{:keys [binding source mods]} (first groups)]
-    (let [source-sym (gensym "source")
-          item-sym (gensym "item")
-          normal-sym (gensym "normal")
-          inner (emit-async-for (next groups) body)
-          channel-body (apply-async-for-mods mods `(do ~inner))
-          coll-body (apply-async-for-mods mods inner)
-          channel-branch `(let [~normal-sym (atom false)]
-                            (try
-                              (loop []
-                                (let [~item-sym (await* ~source-sym)]
-                                  (if (nil? ~item-sym)
-                                    (reset! ~normal-sym true)
-                                    (let [~binding (await ~item-sym)]
-                                      ~channel-body
-                                      (recur)))))
-                              (finally
-                                (when-not @~normal-sym
-                                  (detach (await (areturn ~source-sym)))))))
-          coll-branch `(doseq [~item-sym (source-items ~source-sym)]
-                         (let [~binding (await ~item-sym)]
-                           ~coll-body))]
-      `(let [~source-sym (->promise-chan ~source)]
-         (if (chan? ~source-sym)
-           ~channel-branch
-           ~coll-branch)))
-    `(do ~@body)))
+    (let [item-sym (gensym "item")
+          inner (if (next groups)
+                  `(await ~(emit-async-for (next groups) body))
+                  `(do ~@body))
+          iteration-body (apply-async-for-mods mods inner)]
+      `(#'consume-async-for-source
+        (fn [] ~source)
+        (fn [~item-sym]
+          (async
+            (let [~binding ~item-sym]
+              ~iteration-body)
+            nil))))
+    `(async
+       ~@body
+       nil)))
 
 (defmacro adoseq
   "Asynchronously consumes channel-like or collection-like sources for side
@@ -1300,14 +1322,7 @@ they should short-circuit as soon as they can.")
    lifecycle-aware sources are returned/cleaned up; borrowed plain channels are
    only observed."
   [bindings & body]
-  `(async
-     (try
-       ~(emit-async-for (parse-async-for-bindings bindings) body)
-       nil
-       (catch Throwable t#
-         (when-not (async-iteration-stopped? t#)
-           (throw t#))
-         nil))))
+  (emit-async-for (parse-async-for-bindings bindings) body))
 
 (defmacro afor
   "Asynchronously comprehends over channel-like or collection-like sources,
