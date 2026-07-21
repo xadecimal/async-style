@@ -1,19 +1,19 @@
 # Future Ideas
 
 This file tracks unresolved design ideas that are not part of a current RFC.
-Completed and superseded material is preserved in `specs/archive/`.
+Completed and superseded material is preserved in `specs/changes/archive/`.
 
 Related archived RFCs:
 
-- `specs/archive/implemented/async-iteration/rfc.md`
-- `specs/archive/implemented/pre-1-0-promise-combinators-and-time-observation/rfc.md`
-- `specs/archive/implemented/remove-implicit-try/rfc.md`
-- `specs/archive/superseded/promise-combinator-next-take/rfc.md`
+- `specs/changes/archive/0001-async-iteration/RFC.md`
+- `specs/changes/archive/0002-promise-combinator-next-take/RFC.md`
+- `specs/changes/archive/0003-pre-1-0-promise-combinators-and-time-observation/RFC.md`
+- `specs/changes/archive/0004-remove-implicit-try/RFC.md`
 
 ## Potential Namespace Split
 
 The completed pre-1.0 decision to retain one convenient root namespace is
-archived in `specs/archive/completed-future-ideas.md`.
+archived in `specs/changes/archive/0005-pre-1-0-api-decisions/RFC.md`.
 
 Reconsider a separate namespace only if the many-value API grows enough that
 the root namespace becomes hard to scan.
@@ -32,7 +32,7 @@ ergonomics.
 
 The prefix options position on `async`, `blocking`, and `compute` is already
 reserved; that completed decision is archived in
-`specs/archive/completed-future-ideas.md`.
+`specs/changes/archive/0005-pre-1-0-api-decisions/RFC.md`.
 
 A future RFC can define non-empty execution options such as:
 

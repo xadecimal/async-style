@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented.
+Completed
 
 ## Summary
 
@@ -18,7 +18,7 @@ APIs.
 
 Related context:
 
-- `specs/archive/superseded/promise-combinator-next-take/rfc.md`
+- `../0002-promise-combinator-next-take/RFC.md`
 - `specs/future-ideas.md`
 
 ## Goals

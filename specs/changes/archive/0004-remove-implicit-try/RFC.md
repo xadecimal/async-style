@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented.
+Completed
 
 Archive note: This RFC supersedes the implicit trailing `catch` / `finally`
 requirements recorded in the async-iteration RFC and its implementation notes.

@@ -1,8 +1,68 @@
-# Completed Future Ideas
+# RFC 0005 - Pre-1.0 API Decisions
 
-This file preserves ideas moved out of `specs/future-ideas.md` after their
+## Status
+
+Completed
+
+## Summary
+
+Record several pre-1.0 API decisions that began as future ideas and were
+completed without separate focused RFCs: retaining the root namespace,
+reserving execution option maps, keeping `time` observation-only, and
+documenting Promise-combinator lifecycle boundaries.
+
+## Motivation
+
+These decisions shaped the implemented public contract and need a durable
+historical record after `/specs/current` became the canonical description of
+the system.
+
+## Scope
+
+- Root namespace organization.
+- Prefix execution option-map reservation.
+- Observation semantics for `time`.
+- Promise-combinator and async-source lifecycle documentation.
+
+## Out Of Scope
+
+- Defining non-empty execution option keys.
+- Splitting the public namespace.
+- Adding new many-value operators.
+
+## Current Behavior At Completion
+
+All decisions below were implemented before this retrospective RFC was
+normalized into the archive.
+
+## Specification Changes
+
+The final behavior is described in:
+
+- `specs/current/architecture/overview.md`
+- `specs/current/api/execution-and-cancellation.md`
+- `specs/current/api/promise-composition.md`
+
+## Compatibility
+
+The option-map reservation rejects previously ambiguous leading non-empty maps
+in multi-form execution bodies. The other recorded decisions clarify or
+preserve existing behavior.
+
+## Acceptance Criteria
+
+- [x] The root namespace remains the public entry point.
+- [x] Leading literal option maps are reserved and validated.
+- [x] `time` observes borrowed work without taking ownership.
+- [x] Promise-style and lifecycle-aware APIs have explicit boundaries.
+- [x] Implemented behavior is represented in `/specs/current`.
+
+## Completed Decisions
+
+These sections preserve ideas moved out of `specs/future-ideas.md` after their
 requested work was completed. Future extensions mentioned inside a completed
-decision remain active only when they are still listed in `specs/future-ideas.md`.
+decision remain active only when they are still listed in
+`specs/future-ideas.md`.
 
 ## Root Namespace Organization
 

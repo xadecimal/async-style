@@ -1,12 +1,12 @@
 # 0001 Implementation Tasks
 
-Status: Complete.
+Status: Completed.
 
 Archive note: Checked implicit-try tasks record an intermediate implementation
 that was subsequently removed by the implicit-try removal RFC.
 
 Task breakdown for implementing
-`rfc.md`.
+`RFC.md`.
 
 ## 0. Lock Initial API Decisions
 

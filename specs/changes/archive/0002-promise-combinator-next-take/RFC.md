@@ -2,9 +2,11 @@
 
 ## Status
 
-Superseded by
-`specs/archive/implemented/pre-1-0-promise-combinators-and-time-observation/rfc.md`.
-The proposed behavior was implemented through that consolidated RFC.
+Superseded
+
+This change was superseded by
+`../0003-pre-1-0-promise-combinators-and-time-observation/RFC.md`. The proposed
+behavior was implemented through that consolidated RFC.
 
 ## Summary
 
