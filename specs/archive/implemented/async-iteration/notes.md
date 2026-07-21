@@ -1,5 +1,9 @@
 # 0001 Implementation Notes
 
+Archive note: These notes record the async-iteration implementation process.
+References to implicit trailing `catch` / `finally` syntax describe an
+intermediate API that was later removed.
+
 Working notes for implementing the async iteration/generator RFC.
 
 ## Core Decisions

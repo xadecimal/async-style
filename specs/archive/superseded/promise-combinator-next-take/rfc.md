@@ -1,6 +1,10 @@
 # RFC: Promise Combinator Next-Take Semantics
 
-Status: Draft
+## Status
+
+Superseded by
+`specs/archive/implemented/pre-1-0-promise-combinators-and-time-observation/rfc.md`.
+The proposed behavior was implemented through that consolidated RFC.
 
 ## Summary
 

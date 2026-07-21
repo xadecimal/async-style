@@ -1,6 +1,13 @@
 # RFC: Async Iteration, Transduction, and Generators
 
-Status: Draft
+## Status
+
+Implemented.
+
+Archive note: This RFC records the implemented async-iteration design. Its
+requirements for implicit trailing `catch` / `finally` syntax describe an
+intermediate API and were superseded by
+`specs/archive/implemented/remove-implicit-try/rfc.md`.
 
 ## Summary
 

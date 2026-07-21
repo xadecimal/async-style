@@ -4,6 +4,9 @@
 
 Implemented.
 
+Archive note: This RFC supersedes the implicit trailing `catch` / `finally`
+requirements recorded in the async-iteration RFC and its implementation notes.
+
 ## Summary
 
 Remove async-style's implicit trailing `catch` / `finally` syntax from all

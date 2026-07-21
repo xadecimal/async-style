@@ -1,7 +1,12 @@
 # 0001 Implementation Tasks
 
+Status: Complete.
+
+Archive note: Checked implicit-try tasks record an intermediate implementation
+that was subsequently removed by the implicit-try removal RFC.
+
 Task breakdown for implementing
-`0001-js-like-await-for-and-async-generators.md`.
+`rfc.md`.
 
 ## 0. Lock Initial API Decisions
 

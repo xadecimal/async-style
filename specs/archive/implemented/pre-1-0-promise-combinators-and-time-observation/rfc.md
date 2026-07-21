@@ -1,6 +1,8 @@
 # RFC: Pre-1.0 Promise Combinator And Time Observation Fixes
 
-Status: Draft
+## Status
+
+Implemented.
 
 ## Summary
 
@@ -16,7 +18,7 @@ APIs.
 
 Related context:
 
-- `specs/changes/future-promise-combinator-next-take/rfc.md`
+- `specs/archive/superseded/promise-combinator-next-take/rfc.md`
 - `specs/future-ideas.md`
 
 ## Goals

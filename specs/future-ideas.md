@@ -1,26 +1,22 @@
 # Future Ideas
 
-This file tracks design ideas discussed during async iteration and Promise
-combinator review that are not part of the current RFCs.
+This file tracks unresolved design ideas that are not part of a current RFC.
+Completed and superseded material is preserved in `specs/archive/`.
 
-Related RFCs:
+Related archived RFCs:
 
-- `specs/changes/0001-js-like-await-for-and-async-generators.md`
-- `specs/changes/future-promise-combinator-next-take/rfc.md`
-- `specs/changes/pre-1-0-promise-combinators-and-time-observation/rfc.md`
-- `specs/future-changes/0001-remove-implicit-try/rfc.md`
+- `specs/archive/implemented/async-iteration/rfc.md`
+- `specs/archive/implemented/pre-1-0-promise-combinators-and-time-observation/rfc.md`
+- `specs/archive/implemented/remove-implicit-try/rfc.md`
+- `specs/archive/superseded/promise-combinator-next-take/rfc.md`
 
-## API Organization
+## Potential Namespace Split
 
-Keep the root namespace convenient for now. The useful split is conceptual:
+The completed pre-1.0 decision to retain one convenient root namespace is
+archived in `specs/archive/completed-future-ideas.md`.
 
-- Single-result async values and Promise-style combinators.
-- Many-value channel/lifecycle APIs such as `async-generator`, `anext`,
-  `areturn`, `adoseq`, `afor`, `areduce`, `atransduce`, and `ainto`.
-
-Do not introduce a physical namespace split just for tidiness. Reconsider a
-separate namespace only if the many-value API grows enough that the root
-namespace becomes hard to scan.
+Reconsider a separate namespace only if the many-value API grows enough that
+the root namespace becomes hard to scan.
 
 Possible later shape:
 
@@ -32,30 +28,13 @@ Possible later shape:
 If that happens, the root namespace can still re-export common APIs for
 ergonomics.
 
-## Prefix Options Maps
+## Execution Option Keys
 
-`async-generator` already accepts a prefix options map for generator-specific
-options such as `:buffer-size`. That behavior is part of the async-generator
-RFC and is not reopened here.
+The prefix options position on `async`, `blocking`, and `compute` is already
+reserved; that completed decision is archived in
+`specs/archive/completed-future-ideas.md`.
 
-Before 1.0, reserve the same prefix position for options on `async`, `blocking`,
-and `compute`. A literal leading map followed by at least one body form is
-therefore an options map. A sole map remains an ordinary body value, so
-`(async {})` returns an empty map. No execution option keys are implemented yet:
-an empty prefix map is accepted and any non-empty prefix map is rejected at
-macro expansion. This makes future options additive without silently ignoring
-unsupported keys.
-
-Code that intends to evaluate a map first in a multi-form body must make that
-intent explicit, for example by wrapping it in `do`:
-
-```clojure
-(async
-  (do {:status :starting})
-  (do-work))
-```
-
-A separate future RFC can define prefix options for execution macros:
+A future RFC can define non-empty execution options such as:
 
 ```clojure
 (async {:name "fetch-user"}
@@ -79,15 +58,6 @@ Do not use an options map as a general workflow language for `:catch`,
 `:finally`, `:retry`, or `:with-resource`. Error handling, retry, and resource
 management should remain explicit composable forms inside the body unless a
 focused RFC makes a different case.
-
-Prefer prefix options over suffix options. A suffix map is ambiguous with a body
-whose final value is a map:
-
-```clojure
-(async
-  (do-work)
-  {:status :ok})
-```
 
 The option keys and their behavior deserve their own RFC before non-empty
 options are accepted by `async`, `blocking`, or `compute`.
@@ -292,27 +262,6 @@ Design questions:
 
 This also deserves its own RFC before implementation.
 
-## Instrumentation Semantics For `time`
-
-`time` currently observes an expression and uses async-style callback machinery
-for timing side effects when the expression returns a channel.
-
-Open question: should instrumentation be strictly observation-only, even inside
-an active cancellation scope?
-
-Potential issue:
-
-- If timing output is implemented with owned async callback work, cancellation
-  or parent completion could make timing output surprising in edge cases.
-
-Possible future cleanup:
-
-- Document current behavior.
-- Or detach the timing callback / implement lighter observation so timing is
-  not meaningfully owned by the current scope.
-
-This is lower priority than Promise combinator next-take behavior.
-
 ## `clet` Semantics
 
 `clet` starts each binding as an async value and then rewrites later references
@@ -327,17 +276,3 @@ The current model is acceptable, but future docs could clarify:
   scope when that scope completes, fails, or is cancelled.
 
 This does not currently need a behavior change.
-
-## Documentation Cleanup
-
-Future doc/docstring work should make the following boundaries explicit:
-
-- Promise-style combinators are single-result APIs.
-- Many-valued channel inputs contribute one next take.
-- Promise-style combinators do not call `areturn`, `close!`, or `cancel!` on
-  input sources.
-- `anext` takes one raw source value and does not imply lifecycle cleanup.
-- `areturn` is the explicit early lifecycle cleanup API.
-- `timeout` applies to one result, not to the lifetime of a source.
-- Structured concurrency still cleans up owned generator producers when the
-  owning scope ends.
