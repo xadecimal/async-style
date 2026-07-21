@@ -30,6 +30,7 @@ Types of changes:
 - Removed implicit trailing `catch` / `finally` parsing from `async`, `blocking`, `compute`, `async-generator`, `await`, and `wait`. Use ordinary explicit `try` forms; `await` and `wait` now accept exactly one argument.
 
 ### Changed
+- `async`, `blocking`, and `compute` now reserve a leading literal map for future options when body forms follow it. An empty prefix map is accepted and non-empty prefix maps are rejected until option keys are defined. A sole map remains an ordinary body value.
 - Cancellation now follows ownership. Work started with `async`, `blocking`, or `compute` inside another execution becomes an owned child unless started inside `detach`; cancellation, failure, or normal completion of a parent cancels its unfinished children transitively.
 - Awaiting or composing already-started work does not transfer ownership. `timeout`, `race`, `any`, `all`, and `all-settled` observe borrowed inputs without cancelling them, and `race` and `any` do not cancel losing inputs. Work originally started inside the current parent remains owned by that parent.
 - `async`, `blocking`, and `compute` now wait for one returned promise-like single-result value before settling their own result promise-chan. Nested async-style producers continue to compose, while ordinary channels and async-generator sources are preserved as channel values.

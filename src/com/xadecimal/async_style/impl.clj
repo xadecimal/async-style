@@ -416,54 +416,68 @@ they should short-circuit as soon as they can.")
 (defn- async'
   "Wraps body in a way that it executes in an async or blocking block with
    support for cancellation and returns a promise-chan settled with the result
-   or any exception thrown."
+   or any exception thrown. A leading map is parsed as reserved execution
+   options when at least one body form follows it."
   [body execution-type]
-  (case execution-type
-    :async `(let [ret# (a/promise-chan)
-                  parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
-              (register-child! parent# ret#)
-              (a/go
-                (binding [*cancellation-chan* ret#]
-                  (when-not (cancelled?)
-                    (settle! ret#
-                             (try (do ~@body)
-                                  (catch Throwable t#
-                                    t#))))))
-              ret#)
-    `(let [ret# (a/promise-chan)
-           interrupter-thread# (volatile! nil)
-           interrupt-lock# (ReentrantLock.)
-           interrupter# (fn []
-                          (with-lock interrupt-lock#
-                            (when-some [^Thread t# @interrupter-thread#]
-                              (.interrupt t#))))
-           parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
-       (add-cancellation-callback! ret# interrupter#)
-       (register-child! parent# ret#)
-       (~(case execution-type
-           :blocking (if executor-for `a/io-thread `a/thread)
-           :compute `compute')
-        (binding [*cancellation-chan* ret#]
-          (let [value-or-error#
-                (try
-                  (vreset! interrupter-thread# (Thread/currentThread))
-                  (when-not (cancelled?)
-                    (try (do ~@body)
-                         (catch Throwable t#
-                           t#)))
-                  (finally
-                    (with-lock interrupt-lock#
-                      (vreset! interrupter-thread# nil))
-                    (remove-cancellation-callback! ret# interrupter#)))]
-            (settle-blocking! ret# value-or-error#))))
-       ret#)))
+  (let [body (if (and (map? (first body)) (next body))
+               (let [opts (first body)]
+                 (when (seq opts)
+                   (throw
+                    (IllegalArgumentException.
+                     (str (name execution-type)
+                          " options are reserved for future use and are not supported yet: "
+                          (pr-str (keys opts))))))
+                 (next body))
+               body)]
+    (case execution-type
+      :async `(let [ret# (a/promise-chan)
+                    parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
+                (register-child! parent# ret#)
+                (a/go
+                  (binding [*cancellation-chan* ret#]
+                    (when-not (cancelled?)
+                      (settle! ret#
+                               (try (do ~@body)
+                                    (catch Throwable t#
+                                      t#))))))
+                ret#)
+      `(let [ret# (a/promise-chan)
+             interrupter-thread# (volatile! nil)
+             interrupt-lock# (ReentrantLock.)
+             interrupter# (fn []
+                            (with-lock interrupt-lock#
+                              (when-some [^Thread t# @interrupter-thread#]
+                                (.interrupt t#))))
+             parent# (when (cancellation-chan-bound?) *cancellation-chan*)]
+         (add-cancellation-callback! ret# interrupter#)
+         (register-child! parent# ret#)
+         (~(case execution-type
+             :blocking (if executor-for `a/io-thread `a/thread)
+             :compute `compute')
+          (binding [*cancellation-chan* ret#]
+            (let [value-or-error#
+                  (try
+                    (vreset! interrupter-thread# (Thread/currentThread))
+                    (when-not (cancelled?)
+                      (try (do ~@body)
+                           (catch Throwable t#
+                             t#)))
+                    (finally
+                      (with-lock interrupt-lock#
+                        (vreset! interrupter-thread# nil))
+                      (remove-cancellation-callback! ret# interrupter#)))]
+              (settle-blocking! ret# value-or-error#))))
+         ret#))))
 
 (defmacro async
   "Asynchronously execute body on the async-pool with support for cancellation,
    returning a promise-chan settled with the result or any exception thrown.
 
    body will run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, use blocking or compute instead."
+   or compute heavy, use blocking or compute instead.
+
+   A leading options map followed by body forms is reserved for future use and
+   must currently be empty. A sole map remains an ordinary body value."
   [& body]
   (async' body :async))
 
@@ -473,7 +487,10 @@ they should short-circuit as soon as they can.")
    exception thrown.
 
    body will run on the blocking-pool, so use this when you will be blocking or
-   doing blocking io only."
+   doing blocking io only.
+
+   A leading options map followed by body forms is reserved for future use and
+   must currently be empty. A sole map remains an ordinary body value."
   [& body]
   (async' body :blocking))
 
@@ -485,7 +502,10 @@ they should short-circuit as soon as they can.")
    body will run on the compute-pool, so use this when you will be doing heavy
    computation, and don't block, if you're going to block use blocking
    instead. If you're doing a very small computation, like polling another chan,
-   use async instead."
+   use async instead.
+
+   A leading options map followed by body forms is reserved for future use and
+   must currently be empty. A sole map remains an ordinary body value."
   [& body]
   (async' body :compute))
 
@@ -1308,9 +1328,13 @@ they should short-circuit as soon as they can.")
             (let [~binding ~item-sym]
               ~iteration-body)
             nil))))
-    `(async
-       ~@body
-       nil)))
+    (if (map? (first body))
+      `(async {}
+         ~@body
+         nil)
+      `(async
+         ~@body
+         nil))))
 
 (defmacro adoseq
   "Asynchronously consumes channel-like or collection-like sources for side
@@ -1441,7 +1465,10 @@ they should short-circuit as soon as they can.")
                             ;; Map each bound symbol to a vector: [ (await sym) (wait sym) ]
                             new-env (assoc env sym [(list `await sym)
                                                     (list `wait sym)])]
-                        [new-env (conj binds [sym `(async ~new-val)])]))
+                        [new-env (conj binds
+                                       [sym (if (map? new-val)
+                                              `(async {} ~new-val)
+                                              `(async ~new-val))])]))
                     [{} []]
                     binding-pairs))]
     (let [[final-env binds] (process-bindings (partition 2 bindings))
@@ -1451,7 +1478,9 @@ they should short-circuit as soon as they can.")
                                       (first body))
                                     false)]
       `(let [~@(apply concat binds)]
-         (async ~body-form)))))
+         ~(if (map? body-form)
+            `(async {} ~body-form)
+            `(async ~body-form))))))
 
 (defmacro time
   "Evaluates expr and reports the time it took. Returns the original value of

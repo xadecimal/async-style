@@ -149,7 +149,10 @@ Core terms:
    returning a promise-chan settled with the result or any exception thrown.
 
    body will run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, use blocking or compute instead."
+   or compute heavy, use blocking or compute instead.
+
+   A leading options map followed by body forms is reserved for future use and
+   must currently be empty. A sole map remains an ordinary body value."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/async ~@body)))
 
@@ -159,7 +162,10 @@ Core terms:
    exception thrown.
 
    body will run on the blocking-pool, so use this when you will be blocking or
-   doing blocking io only."
+   doing blocking io only.
+
+   A leading options map followed by body forms is reserved for future use and
+   must currently be empty. A sole map remains an ordinary body value."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/blocking ~@body)))
 
@@ -171,7 +177,10 @@ Core terms:
    body will run on the compute-pool, so use this when you will be doing heavy
    computation, and don't block, if you're going to block use blocking
    instead. If you're doing a very small computation, like polling another chan,
-   use async instead."
+   use async instead.
+
+   A leading options map followed by body forms is reserved for future use and
+   must currently be empty. A sole map remains an ordinary body value."
   {}
   ([& body] ` (com.xadecimal.async-style.impl/compute ~@body)))
 

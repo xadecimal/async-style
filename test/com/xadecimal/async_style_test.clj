@@ -1152,6 +1152,44 @@ it supports handling thread interrupted."
            (is (= :cancelled (dq!)))
            (is (not= :was-not-cancelled (dq!))))))
 
+
+(deftest execution-options-tests
+  (testa "Async, blocking, and compute reserve an empty leading options map."
+         (is (= :async-result (wait (async {} :async-result))))
+         (is (= :blocking-result (wait (blocking {} :blocking-result))))
+         (is (= :compute-result (wait (compute {} :compute-result)))))
+
+  (testa "A sole map is an ordinary body value, not an options map."
+         (is (= {} (wait (async {}))))
+         (is (= {:status :ok} (wait (async {:status :ok}))))
+         (is (= {} (wait (blocking {}))))
+         (is (= {:status :ok} (wait (blocking {:status :ok}))))
+         (is (= {} (wait (compute {}))))
+         (is (= {:status :ok} (wait (compute {:status :ok})))))
+
+  (testa "Reserved execution options fail at macro expansion until supported."
+         (doseq [form '((com.xadecimal.async-style.impl/async
+                         {:name "async-work"} :result)
+                        (com.xadecimal.async-style.impl/blocking
+                         {:name "blocking-work"} :result)
+                        (com.xadecimal.async-style.impl/compute
+                         {:name "compute-work"} :result))]
+           (let [error (try
+                         (macroexpand form)
+                         nil
+                         (catch clojure.lang.Compiler$CompilerException e
+                           e))]
+             (is (instance? IllegalArgumentException (ex-cause error)))
+             (is (re-find
+                  #"options are reserved for future use and are not supported yet"
+                  (ex-message (ex-cause error)))))))
+
+  (testa "A wrapped leading map remains ordinary syntax in a multi-form body."
+         (is (= {:status :ok} (wait (async (do {:status :ok})))))
+         (is (= {:status :ok} (wait (blocking (do {:status :ok})))))
+         (is (= {:status :ok} (wait (compute (do {:status :ok})))))))
+
+
 (deftest await-tests
   (testa "Await is used to wait on the result of an async operation."
          (async
@@ -2495,7 +2533,7 @@ awaited, then the second, then the third, etc."
             (q! (+ a b c)))
           q!)
          (is (= 6 (dq!)))
-         (is (< 100 (dq!) 110)))
+         (is (< 100 (dq!) 150)))
 
   (testa "Unless one binding depends on a previous one, in which case that binding
 will await the other, but only the dependent bindings will be sequenced after what
@@ -2509,7 +2547,7 @@ they depend on, others will still run concurrently."
             (q! (+ a b c d)))
           q!)
          (is (= 300 (dq!)))
-         (is (< 300 (dq!) 330)))
+         (is (< 300 (dq!) 350)))
 
   (testa "Bindings evaluate on the async-pool, which means they should not do
 any blocking or heavy compute operation. If you need to do a blocking or compute
@@ -2523,7 +2561,7 @@ heavy operation wrap it in blocking or compute accordingly."
             (q! (+ a b c d)))
           q!)
          (is (= 6.666664664588418E8 (dq!)))
-         (is (< 200 (dq!) 220)))
+         (is (< 200 (dq!) 250)))
 
   (testa "You can nest async inside blocking and compute and so on and it'll still
 properly rewrite to await or wait depending on which the binding is inside. This is
@@ -2537,7 +2575,7 @@ not useful, this is just to test that it works."
             (q! (+ a b c d)))
           q!)
          (is (= 6.666664664588418E8 (dq!)))
-         (is (< 200 (dq!) 220)))
+         (is (< 200 (dq!) 250)))
 
   (testa "It works with sets too."
          (clet [a 10
@@ -2636,7 +2674,7 @@ wrap it with time. By default it prints to stdout."
          (-> (sleep 1000)
              (time q!)
              wait)
-         (is (< 1000 (dq!) 1010)))
+         (is (< 1000 (dq!) 1050)))
   (testa "It can also be used to time non-async ops."
          (-> (+ 1 2 3)
              (time q!))

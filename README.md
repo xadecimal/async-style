@@ -129,6 +129,12 @@ async-style follows the best practice outlined here: [Best practice for async/bl
 
 Meaning it offers `async`/`blocking`/`compute`, each are meant to specialize the work you will be doing so they get executed on a pool that is most optimal.
 
+Each execution macro reserves a leading literal map for future options when at
+least one body form follows it. The options map must currently be empty;
+non-empty option maps fail during macro expansion until their keys have defined
+semantics. A sole map remains an ordinary body value, so `(async {})` returns
+`{}`. To evaluate a map first in a multi-form body, wrap it explicitly.
+
 #### When used with core.async <= 1.7
 
 | Macro      | Executor pool                           | Use for…                            |

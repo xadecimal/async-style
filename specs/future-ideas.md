@@ -38,7 +38,24 @@ ergonomics.
 options such as `:buffer-size`. That behavior is part of the async-generator
 RFC and is not reopened here.
 
-A separate future design could add prefix options maps to execution macros:
+Before 1.0, reserve the same prefix position for options on `async`, `blocking`,
+and `compute`. A literal leading map followed by at least one body form is
+therefore an options map. A sole map remains an ordinary body value, so
+`(async {})` returns an empty map. No execution option keys are implemented yet:
+an empty prefix map is accepted and any non-empty prefix map is rejected at
+macro expansion. This makes future options additive without silently ignoring
+unsupported keys.
+
+Code that intends to evaluate a map first in a multi-form body must make that
+intent explicit, for example by wrapping it in `do`:
+
+```clojure
+(async
+  (do {:status :starting})
+  (do-work))
+```
+
+A separate future RFC can define prefix options for execution macros:
 
 ```clojure
 (async {:name "fetch-user"}
@@ -72,8 +89,8 @@ whose final value is a map:
   {:status :ok})
 ```
 
-This deserves its own RFC before adding options to `async`, `blocking`, or
-`compute`.
+The option keys and their behavior deserve their own RFC before non-empty
+options are accepted by `async`, `blocking`, or `compute`.
 
 ## Future Many-Value Helpers
 
