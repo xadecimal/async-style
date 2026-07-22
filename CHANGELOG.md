@@ -15,6 +15,8 @@ Types of changes:
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
 ### Changed
 
 - `async`, `blocking`, and `compute` now reserve a leading literal map for future options when body forms follow it. An empty prefix map is accepted and non-empty prefix maps are rejected until option keys are defined. A sole map remains an ordinary body value.
@@ -72,7 +74,8 @@ Types of changes:
 - Comprehensive test suite covering all public API functions and macros.
 - Extensive README with feature overview, usage examples, and guidance on best‑practice thread‑pool selection.
 
-[unreleased]: https://github.com/xadecimal/async-style/compare/0.3.0...HEAD
+[unreleased]: https://github.com/xadecimal/async-style/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/xadecimal/async-style/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/xadecimal/async-style/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/xadecimal/async-style/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/xadecimal/async-style/tree/0.1.0
