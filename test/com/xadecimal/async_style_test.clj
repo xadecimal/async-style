@@ -775,7 +775,7 @@ exception is thrown"
 
 
 (deftest async-tests
-  (testa "Async is used to run some code asynchronously on the async-pool."
+  (testa "Async runs async orchestration as a core.async go block."
          (-> (async (+ 1 2))
              (handle q!))
          (is (= 3 (dq!))))
@@ -814,14 +814,11 @@ exception is thrown"
            (handle chan q!)
            (is (= :done (dq! 2000)))))
 
-  (testa "Async should be used to shuffle data around, or for very small computations.
-Because all blocks will run in a fixed size thread pool, which by default has only 8
-threads. This means you can't have more than 8 concurrent active blocks, others will
-get queued up and have to wait for one of those 8 to finish. That means avoid doing
-blocking operations or long running computations, for which you should use blocking
-or compute instead. In core.async 1.8+ this is no longer true, as the async pool
-has been replaced by an unbounded pool, but it is still a good practice to use
-it only for async control flow."
+  (testa "Async should be used for async control flow or very small computations.
+With core.async 1.7, go blocks use a fixed dispatch pool with eight platform threads
+by default, so blocking operations can exhaust it. Modern supported core.async uses
+a cached platform-thread dispatch executor, but async remains an IOC go block and
+must still avoid blocking operations and long-running computation."
          (-> (for [i (range 10)]
                (async (Thread/sleep 1000) i))
              (all)
@@ -901,7 +898,7 @@ be able to cancel those blocking ops."
 
 
 (deftest blocking-tests
-  (testa "Blocking is used to run some blocking code asynchronously on the blocking-pool."
+  (testa "Blocking runs blocking work through core.async's blocking execution context."
          (-> (blocking (+ 1 2))
              (handle q!))
          (is (= 3 (dq!))))
@@ -1021,7 +1018,7 @@ it supports handling thread interrupted."
 
 
 (deftest compute-tests
-  (testa "Compute is used to run some code asynchronously on the compute-pool."
+  (testa "Compute runs CPU-heavy work on Clojure's fixed Agent pool."
          (-> (compute (+ 1 2))
              (handle q!))
          (is (= 3 (dq!))))
@@ -2549,7 +2546,7 @@ they depend on, others will still run concurrently."
          (is (= 300 (dq!)))
          (is (< 300 (dq!) 350)))
 
-  (testa "Bindings evaluate on the async-pool, which means they should not do
+  (testa "Bindings evaluate in the async execution context, which means they should not do
 any blocking or heavy compute operation. If you need to do a blocking or compute
 heavy operation wrap it in blocking or compute accordingly."
          (time

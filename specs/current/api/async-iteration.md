@@ -51,6 +51,6 @@ On early exit, reduced completion, failure, or cancellation, lifecycle-aware
 consumers request generator cleanup and wait for finalization. Plain borrowed
 channels are observation-only and are not closed or cancelled.
 
-Reducing functions and transducer steps run in async-pool orchestration code
+Reducing functions and transducer steps run in the async execution context
 and must remain quick and synchronous. Blocking, parking, I/O, and heavy
 computation belong in an execution form or upstream async generator.

@@ -32,10 +32,14 @@ successful value or `Throwable` is delivered as the result; APIs such as
 `await` and `wait` rethrow `Throwable` values while their `*` variants preserve
 them as values.
 
-`async`, `blocking`, and `compute` execute work on pools selected for async
-control flow, blocking work, and CPU-heavy computation respectively. Exact
-executor implementations vary with the `core.async` version and JVM
-configuration.
+`async`, `blocking`, and `compute` select execution contexts for async control
+flow, blocking work, and CPU-heavy computation respectively. `async` remains a
+`core.async` IOC `go` block on its platform-thread dispatch executor.
+`blocking` uses `io-thread` where available, which means one virtual thread per
+task with current `core.async` on Java 21+, and a cached platform-thread
+executor otherwise. `compute` uses Clojure's fixed Agent pooled executor.
+Executor customization can change the exact underlying executors without
+changing those workload contracts.
 
 Multi-result async generators use a channel-compatible wrapper with internal
 lifecycle state. They remain usable with ordinary `core.async` take and close

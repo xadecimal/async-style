@@ -12,7 +12,7 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
 - [Installation](#-installation)
 - [Why async-style?](#why-async-style)
 - [Core Concepts](#core-concepts)
-  - [Pools](#pools-async-blocking-compute)
+  - [Execution contexts](#execution-contexts-async-blocking-compute)
   - [Awaiting](#awaiting-await-wait-await-wait)
   - [Promise coercion](#promise-coercion)
   - [Producer settlement](#producer-settlement)
@@ -21,6 +21,7 @@ A Clojure library that brings JavaScript's intuitive async/await and Promise API
   - [Cancellation](#cancellation)
 - [API Overview](#api-overview)
 - [Helpers: ado, alet, clet, time](#helpers-ado-alet-clet-time)
+- [AI Disclosure](#ai-disclosure)
 - [Contributing](#-contributing)
 - [License](#-license)
 - [Support](#️-support)
@@ -110,7 +111,7 @@ Core.async and the CSP style is powerful, but its `go` blocks and channels can f
 
 - **Familiar ergonomics**: `async`/`await` like in JavaScript, Python, C#, etc.
 - **Expanded ergonomics**: `blocking`/`wait` for I/O and `compute`/`wait` for heavy compute.
-- **Separate pools**: dedicated threads for async control flow (`async`), blocking I/O (`blocking`) and CPU‑bound work (`compute`).
+- **Workload-specific execution**: distinct execution forms for async control flow (`async`), blocking I/O (`blocking`), and CPU-bound work (`compute`).
 - **Built on core.async**: core.async under the hood, can be used alongside it, promises are core.async's `promise-chan`.
 - **First-class error handling**: unlike core.async, errors are bubbled up and properly handled.
 - **First‑class cancellation**: cancellation follows ownership and propagates through promise‑chans.
@@ -123,11 +124,12 @@ Core.async and the CSP style is powerful, but its `go` blocks and channels can f
 
 ## Core Concepts
 
-### Pools: `async`, `blocking`, `compute`
+### Execution contexts: `async`, `blocking`, `compute`
 
 async-style follows the best practice outlined here: [Best practice for async/blocking/compute pools](https://gist.github.com/djspiewak/46b543800958cf61af6efa8e072bfd5c)
 
-Meaning it offers `async`/`blocking`/`compute`, each are meant to specialize the work you will be doing so they get executed on a pool that is most optimal.
+It offers `async`/`blocking`/`compute` so callers describe the kind of work
+being performed. The library then selects the matching execution context.
 
 Each execution macro reserves a leading literal map for future options when at
 least one body form follows it. The options map must currently be empty;
@@ -135,29 +137,25 @@ non-empty option maps fail during macro expansion until their keys have defined
 semantics. A sole map remains an ordinary body value, so `(async {})` returns
 `{}`. To evaluate a map first in a multi-form body, wrap it explicitly.
 
-#### When used with core.async <= 1.7
+| Macro | Execution model | Use for… |
+|---|---|---|
+| `async` | A `core.async` IOC `go` block on its platform-thread dispatch executor | Async control flow, `await`, polling, and short non-blocking work |
+| `blocking` | `core.async/io-thread`; one virtual thread per task with current `core.async` on Java 21+, otherwise a cached platform-thread executor | Blocking I/O, sleeps, and blocking waits |
+| `compute` | Clojure's fixed Agent pool (available processors + 2 platform threads) | CPU-intensive work; do not block, park, or wait |
 
-| Macro      | Executor pool                           | Use for…                            |
-|------------|-----------------------------------------|-------------------------------------|
-| `async`    | core.async’s go‑dispatch (8 threads)    | async control flow | light CPU work |
-| `blocking` | unbounded cached threads                | blocking I/O, sleeps                |
-| `compute`  | fixed agent pool (cores + 2 threads)    | CPU‑intensive work, do not block    |
+`async` does not switch to virtual threads when they are available. On the
+supported `core.async` 1.7 compatibility path, it uses the traditional fixed
+go-dispatch pool (eight platform threads by default), while `blocking` falls
+back to `core.async/thread` on a cached platform-thread executor. In
+`core.async` 1.8, both go dispatch and `io-thread` use cached platform-thread
+execution. Exact executors may also be customized through core.async, but the
+workload guidance above remains the same.
 
-#### When used with core.async >= 1.8
-
-| Macro      | Executor pool                           | Use for…                            |
-|------------|-----------------------------------------|-------------------------------------|
-| `async`    | unbounded cached threads                | async control flow | light CPU work |
-| `blocking` | unbounded cached threads                | blocking I/O, sleeps                |
-| `compute`  | fixed agent pool (cores + 2 threads)    | CPU‑intensive work, do not block    |
-
-#### When used with core.async >= 1.8 with virtual threads
-
-| Macro      | Executor pool                           | Use for…                            |
-|------------|-----------------------------------------|-------------------------------------|
-| `async`    | virtual thread executor                 | async control flow | light CPU work |
-| `blocking` | virtual thread executor                 | blocking I/O, sleeps                |
-| `compute`  | fixed agent pool (cores + 2 threads)    | CPU‑intensive work, do not block    |
+Cancellation interrupts a running `blocking` or `compute` worker, so
+interruptible operations normally stop promptly. Cancellation remains
+cooperative: code that ignores interruption can continue running. Likewise, a
+top-level or detached blocking task is an explicit thread-lifetime task and is
+not stopped merely because its result channel becomes unreachable.
 
 ### Awaiting: `await`, `wait`, `await*`, `wait*`
 
@@ -165,10 +163,10 @@ semantics. A sole map remains an ordinary body value, so `(async {})` returns
 - **`wait`** (outside `async`): blocks calling thread for a result or throws error.
 - **`await*` / `wait*`**: return exceptions as values (no throw).
 
-`await` is like your JavaScript await, but just like core.async's `go`, it cannot park across function boundaries,
-so you have to be careful when you use macros like `map` or `run!`, since those use higher-order functions,
-you cannot `await` with them. This is true in JavaScript's await as well, but it's less common to use
-higher-order functions in JS, so it doesn't feel as restrictive. Once core.async support for virtual thread is added, and if you run under a JDK that supports them, this limitation will go away.
+`await` is like JavaScript's await, but because `async` remains a core.async
+`go` block, it cannot park across function boundaries. Be careful with
+higher-order functions such as `map` and `run!`: their function bodies cannot
+contain `await`. Virtual-thread availability does not remove this restriction.
 
 `wait` is the counter-part to `await`, it is like `await` but synchronous. It doesn't color your functions, but will block your thread.
 
@@ -269,7 +267,7 @@ The default buffer size is `0`, which means an unbuffered, JS-like pull handoff:
 
 Async iteration follows the same ownership rule as the rest of async-style. Creating or returning a cold generator does not start work. Consuming it starts its producer in the current scope, making that producer an owned child of the consuming scope. Early `areturn`, `adoseq`, `afor`, `areduce`, `atransduce`, or `ainto` exit calls generator cleanup and waits for `finally` to run. Borrowed plain channels are only observed; they are not closed or cancelled.
 
-Reducing functions and transducer steps passed to `areduce`, `atransduce`, and `ainto` run inside async-pool orchestration code. Keep them quick and synchronous. Do not block, park, `await`, `wait`, perform I/O, or do heavy compute there; wrap that work in `blocking`, `compute`, `adoseq`, `afor`, or an `async-generator` first.
+Reducing functions and transducer steps passed to `areduce`, `atransduce`, and `ainto` run inside the async execution context. Keep them quick and synchronous. Do not block, park, `await`, `wait`, perform I/O, or do heavy compute there; wrap that work in `blocking`, `compute`, `adoseq`, `afor`, or an `async-generator` first.
 
 ### Errors
 
@@ -497,9 +495,9 @@ Returning a combinator does not make the combinator own borrowed inputs. It only
 
 | Function / Macro | Description                                      |
 |------------------|--------------------------------------------------|
-| `async`          | Run code on the async‑pool                       |
-| `blocking`       | Run code on blocking‑pool                        |
-| `compute`        | Run code on compute‑pool                         |
+| `async`          | Run async orchestration in a core.async `go` block |
+| `blocking`       | Run blocking work using virtual threads when available, with a platform-thread fallback |
+| `compute`        | Run CPU-heavy work on Clojure's fixed Agent pool |
 | `detach`         | Start work outside the current ownership scope   |
 | `async-generator`| Create a cold channel-like async source          |
 | `yield`          | Publish one value from inside `async-generator`  |
@@ -603,6 +601,38 @@ Bind async expressions just like a normal `let`—but choose between sequential 
 
 - Use **`alet`** when bindings must run in sequence.
 - Use **`clet`** to maximize concurrency, with dependencies automatically respected.
+
+---
+
+## AI Disclosure
+
+AI has been used as a development tool on this project starting with version
+0.2.0. No code in version 0.1.x or earlier was generated with AI. Most of the AI
+work since then has used OpenAI GPT-5.5 and GPT-5.6 through Codex, generally at
+High or XHigh reasoning effort.
+
+I use AI as an engineering collaborator and accelerator, not as an autonomous
+maintainer. For substantial changes, I work spec-first: the implemented system
+is described in the current specs, proposed changes are written and questioned
+before implementation, and the specs are updated once the code is verified. I
+interrogate proposed designs, ask about failure modes and compatibility, review
+the resulting code and diffs myself, run the tests, and ask for corrections or
+further investigation when something does not make sense. I do not accept a
+change merely because the model says it is correct, and I remain responsible
+for the design decisions.
+
+For context, I have more than 15 years of professional software-engineering
+experience, including over half of that at senior level. I am highly
+knowledgeable in Clojure and the JVM and would consider myself an expert in
+both. I am also a DevOps engineer with experience designing, implementing,
+deploying, and operating backend systems. I have delivered multiple large,
+multi-month production projects involving teams of roughly 5–15 engineers.
+
+For this particular library, I understand both the problem space and the
+implementation well. I am confident I could have implemented the features
+added after 0.1.0 without AI; using it has primarily made exploration,
+implementation, testing, documentation, and review more convenient. This
+disclosure is here so users can make an informed trust decision.
 
 ---
 

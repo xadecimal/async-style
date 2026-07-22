@@ -40,10 +40,10 @@
                "Async/await-style concurrency and async iteration built on core.async.
 
 Choosing an execution:
-    async: use for async control flow, polling, and small or short computations; work may park, but must not block
-    compute: use for heavy or long-running computation; do not block
-    blocking: use for blocking I/O and other operations that block the current thread
-    Executor implementations vary with the core.async version and JVM configuration.
+    async: an IOC core.async go block for async control flow, await, polling, and short non-blocking work; it does not use virtual threads
+    blocking: core.async io-thread where available; current core.async uses a virtual thread on Java 21+ and cached platform threads otherwise
+    compute: Clojure's fixed Agent pool for heavy or long-running CPU work; do not block, park, or wait
+    Executor implementations may vary with the core.async version, JVM capabilities, and executor customization.
 
 Core terms:
     settle(d): deliver one result and close the channel; settling nil closes without delivering because core.async channels cannot contain nil

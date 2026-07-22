@@ -31,24 +31,6 @@
    + 2 and pre-allocated, use it for heavy computation, don't block it"
   Agent/pooledExecutor) ; Fixed bounded to cpu core + 2 and pre-allocated
 
-(def ^:private blocking-pool
-  "the core.async thread block executor, it is caching, unbounded and not
-   pre-allocated, use it for blocking operations and blocking io"
-  (if executor-for
-    ;; Used by a/io-thread
-    (@executor-for :io)
-    ;; Used by a/thread
-    @#'a/thread-macro-executor))
-
-(def ^:private async-pool
-  "the core.async go block executor, it is fixed size, defaulting to 8 threads,
-   don't soft or hard block it"
-  (if executor-for
-    ;; Used by a/go in 1.8+
-    (@executor-for :core-async-dispatch)
-    ;; Used by a/go
-    @d/executor))
-
 (def ^WeakHashMap cancellation-callbacks
   (WeakHashMap.))
 
@@ -470,11 +452,15 @@ they should short-circuit as soon as they can.")
          ret#))))
 
 (defmacro async
-  "Asynchronously execute body on the async-pool with support for cancellation,
-   returning a promise-chan settled with the result or any exception thrown.
+  "Asynchronously execute body as a core.async go block with support for
+   cancellation, returning a promise-chan settled with the result or any
+   exception thrown.
 
-   body will run on the async-pool, so if you plan on doing something blocking
-   or compute heavy, use blocking or compute instead.
+   Use async for async control flow, parking with await, polling, and short
+   non-blocking work. Do not perform blocking I/O, blocking waits, or sustained
+   CPU-heavy work; use blocking or compute instead. Async remains an IOC go
+   block and does not switch to virtual-thread execution when virtual threads
+   are available.
 
    A leading options map followed by body forms is reserved for future use and
    must currently be empty. A sole map remains an ordinary body value."
@@ -482,12 +468,16 @@ they should short-circuit as soon as they can.")
   (async' body :async))
 
 (defmacro blocking
-  "Asynchronously execute body on the blocking-pool with support for
-   cancellation, returning a promise-chan settled with the result or any
+  "Asynchronously execute body in the blocking execution context with support
+   for cancellation, returning a promise-chan settled with the result or any
    exception thrown.
 
-   body will run on the blocking-pool, so use this when you will be blocking or
-   doing blocking io only.
+   Uses core.async io-thread when available and falls back to core.async thread
+   on older versions. Current core.async uses one virtual thread per io-thread
+   task on Java 21+, with cached platform threads as the fallback. Use blocking
+   for blocking I/O, sleeps, and blocking waits, not sustained CPU-heavy work.
+   Cancellation interrupts the worker but remains cooperative for code that
+   ignores interruption.
 
    A leading options map followed by body forms is reserved for future use and
    must currently be empty. A sole map remains an ordinary body value."
@@ -495,14 +485,13 @@ they should short-circuit as soon as they can.")
   (async' body :blocking))
 
 (defmacro compute
-  "Asynchronously execute body on the compute-pool with support for
-   cancellation, returning a promise-chan settled with the result or any
-   exception thrown.
+  "Asynchronously execute body on Clojure's fixed Agent pooled executor with
+   support for cancellation, returning a promise-chan settled with the result
+   or any exception thrown.
 
-   body will run on the compute-pool, so use this when you will be doing heavy
-   computation, and don't block, if you're going to block use blocking
-   instead. If you're doing a very small computation, like polling another chan,
-   use async instead.
+   The executor uses the available processor count plus two platform threads.
+   Use compute for heavy or long-running CPU work. Do not block, park, or wait;
+   use blocking for blocking operations and async for short orchestration work.
 
    A leading options map followed by body forms is reserved for future use and
    must currently be empty. A sole map remains an ordinary body value."
@@ -536,7 +525,7 @@ they should short-circuit as soon as they can.")
 (defmacro async-generator
   "Creates a cold async-style channel whose body can yield many values.
 
-   The body runs on the async-pool when the returned channel is first consumed,
+   The body runs in an async go-block context when the returned channel is first consumed,
    not when the channel is created. Values published with yield are delivered as
    raw channel values, and channel close means the generator is done.
 
@@ -759,7 +748,7 @@ they should short-circuit as soon as they can.")
    Returns a promise-chan settled with the value or the return of the
    error-handler.
 
-   error-handler will run on the async-pool, so if you plan on doing something
+   error-handler will run in the async execution context, so if you plan on doing something
    blocking or compute heavy, remember to wrap it in a blocking or compute
    respectively.
 
@@ -789,7 +778,7 @@ they should short-circuit as soon as they can.")
    Returns a promise-chan settled with the taken value, and not the return of f,
    which means f is implied to be doing side-effect(s).
 
-   f will run on the async-pool, so if you plan on doing something blocking or
+   f will run in the async execution context, so if you plan on doing something blocking or
    compute heavy, remember to wrap it in a blocking or compute respectively.
 
    Note:
@@ -806,7 +795,7 @@ they should short-circuit as soon as they can.")
 
    Returns a promise-chan settled with the result of f or the error.
 
-   f will run on the async-pool, so if you plan on doing something blocking or
+   f will run in the async execution context, so if you plan on doing something blocking or
    compute heavy, remember to wrap it in a blocking or compute respectively.
 
    Note:
@@ -822,7 +811,7 @@ they should short-circuit as soon as they can.")
   "Chains multiple then together starting with chan like:
      (-> chan (then f1) (then f2) (then fs) ...)
 
-   fs will all run on the async-pool, so if you plan on doing something blocking
+   fs will all run in the async execution context, so if you plan on doing something blocking
    or compute heavy, remember to wrap it in a blocking or compute respectively.
 
    Note:
@@ -843,7 +832,7 @@ they should short-circuit as soon as they can.")
    respective one will be called based on if chan's result is ok (ok-handler
    result) or an error (error-handler error).
 
-   f, ok-handler and error-handler will all run on the async-pool, so if you
+   f, ok-handler and error-handler will all run in the async execution context, so if you
    plan on doing something blocking or compute heavy, remember to wrap it in a
    blocking or compute respectively.
 
@@ -875,7 +864,7 @@ they should short-circuit as soon as they can.")
   "Waits ms time and then asynchronously executes value-or-fn, returning a
    promsie-chan settled with the result.
 
-   value-or-fn will run on the async-pool, so if you plan on doing something
+   value-or-fn will run in the async execution context, so if you plan on doing something
    blocking or compute heavy, remember to wrap it in a blocking or compute
    respectively."
   [ms value-or-fn]
@@ -899,7 +888,7 @@ they should short-circuit as soon as they can.")
    Timing out only stops timeout's own observation. It does not close, cancel,
    or lifecycle-return chan, so a many-valued channel remains usable.
 
-   timed-out-value-or-fn will run on the async-pool, so if you plan on doing
+   timed-out-value-or-fn will run in the async execution context, so if you plan on doing
    something blocking or compute heavy, remember to wrap it in a blocking or
    compute respectively.
 
@@ -1153,7 +1142,7 @@ they should short-circuit as soon as they can.")
    lifecycle-aware sources are returned/cleaned up, and the promise-chan settles
    with the unwrapped reduced value.
 
-   rf runs on the async-pool and should be quick: do not block, park, wait, or
+   rf runs in the async execution context and should be quick: do not block, park, wait, or
    perform heavy compute work inside it."
   [rf init source]
   (async
@@ -1188,7 +1177,7 @@ they should short-circuit as soon as they can.")
 
    source may be channel-like or collection-like. Early transducer completion,
    errors, and cancellation return/clean up lifecycle-aware sources. Transducer
-   and reducing steps run on the async-pool and should be quick; do not block,
+   and reducing steps run in the async execution context and should be quick; do not block,
    park, wait, or perform heavy compute work inside them."
   [xf rf init source]
   (async
@@ -1396,7 +1385,7 @@ they should short-circuit as soon as they can.")
    blocking behavior.
 
    Notes:
-     * Bindings are evaluated in the async-pool; therefore, they should not
+     * Bindings are evaluated in the async execution context; therefore, they should not
        perform blocking I/O or heavy compute directly. If you need to do blocking
        operations or heavy compute, wrap the binding in a blocking or compute call.
      * This macro only supports simple symbol bindings; destructuring (vector or

@@ -3,11 +3,27 @@
 ## Execution Forms
 
 `async`, `blocking`, and `compute` start single-result executions and return
-promise channels:
+promise channels. They select execution contexts by workload:
 
-- `async` is for async orchestration and short non-blocking work.
-- `blocking` is for blocking I/O and other operations that block a thread.
-- `compute` is for heavy or long-running CPU work and must not block.
+- `async` runs as a `core.async` `go` block. It is for async orchestration,
+  parking with `await`, polling, and short non-blocking work. It must not perform
+  blocking I/O, call blocking waits, or run sustained CPU-heavy work. Modern
+  `core.async` continues to execute `go` blocks through its IOC machinery on a
+  platform-thread dispatch executor; availability of virtual threads does not
+  change `async` into a virtual-thread execution.
+- `blocking` runs as `core.async` `io-thread` when that API is available and
+  falls back to `core.async` `thread` on older versions. With current
+  `core.async` on Java 21 or newer, each `io-thread` task uses a virtual thread.
+  When virtual threads are unavailable, and on the supported `core.async` 1.7
+  compatibility path, it uses a cached platform-thread executor. It is for
+  blocking I/O, sleeps, and other operations that block a thread, not sustained
+  CPU-heavy work.
+- `compute` runs on Clojure's fixed Agent pooled executor, whose size is the
+  available processor count plus two platform threads. It is for heavy or
+  long-running CPU work and must not block, park, or wait.
+
+Executor factories and JVM capabilities may change the exact underlying
+executor, but they do not change these workload contracts.
 
 Each form reserves a leading literal options map when another body form
 follows. The only accepted options map is currently empty. A non-empty options
@@ -65,6 +81,12 @@ execution ends.
 `cancel!` settles or signals a single-result operation with a non-nil
 cancellation value. Without an explicit value it uses a
 `CancellationException`. Cancellation is cooperative for running user code.
+
+Cancelling a running `blocking` or `compute` execution also interrupts its
+worker thread. This stops interruptible blocking operations, but code that
+swallows or does not respond to interruption can remain running. A top-level or
+detached blocking execution therefore remains an explicit thread-lifetime task;
+dropping its result channel does not make the running thread collectible.
 
 `cancelled?` reports whether the current execution has been cancelled, and
 `check-cancelled!` throws an `InterruptedException` at a caller-selected safe
